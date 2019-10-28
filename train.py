@@ -11,7 +11,8 @@ from skimage import transform, color, exposure
 import keras
 from keras.models import Sequential, Model, load_model
 from keras.layers import Dense, Flatten, Activation, Input, Concatenate
-from keras.layers import Conv2D, LeakyReLU, BatchNormalization, ReLU
+from keras.layers import Conv2D, ReLU, BatchNormalization, LeakyReLU
+from keras_contrib.layers.normalization.instancenormalization import InstanceNormalization
 from keras.engine.topology import Layer
 from keras.layers.merge import _Merge
 from keras.optimizers import RMSprop, Adam
@@ -38,8 +39,8 @@ import math
 import matplotlib.pyplot as plt
 
 GAMMA = 0.99                #discount value
-BETA = 0.00                 #regularisation coefficient
-VAR_SCALE = 0.5
+BETA = 0.01                 #regularisation coefficient
+VAR_SCALE = 0.1
 R_SCALE = 0.1
 LAMBDA = 10
 IMAGE_ROWS = 32
@@ -49,8 +50,8 @@ NUM_CROPS = 1
 TIME_SLICES = 1
 NUM_ACTIONS = 8
 IMAGE_CHANNELS = TIME_SLICES * NUM_CROPS * 3
-LEARNING_RATE_RL = 1e-4
-LEARNING_RATE_DISC = 2e-4
+LEARNING_RATE_RL = 5e-5
+LEARNING_RATE_DISC = 5e-5
 LOSS_CLIPPING = 0.2
 LOOK_SPEED = 0.1
 # TEMPERATURE = 0
@@ -71,6 +72,7 @@ episode_critic = np.empty((0, 1), dtype=np.float32)
 
 now = datetime.now().strftime("%Y%m%d-%H%M%S")
 summary_writer = tf.summary.FileWriter("logs/" + now, tf.get_default_graph())
+# tb_callback = keras.callbacks.TensorBoard(log_dir='logs/softplus_glorot/', histogram_freq=1, write_grads=True, write_graph=True)
 
 DUMMY_ADVANTAGE = np.zeros((1, 1))
 DUMMY_OLD_PRED  = np.zeros((1, NUM_ACTIONS * 2))
@@ -199,28 +201,35 @@ class AddNoise(Layer):
 #function buildmodel() to define the structure of the neural network in use 
 def buildmodel():
 	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Input')
-	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2))(S)
-	# h0 = AddNoise()(h0)
-	h0 = ReLU()(h0)
-	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2))(h0)
-	# h1 = AddNoise()(h1)
-	h1 = ReLU()(h1)
-	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2))(h1)
-	# h2 = AddNoise()(h2)
-	h2 = ReLU()(h2)
+
+	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(S)
+
+	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(from_color)
+	h0 = AddNoise()(h0)
+	h0 = LeakyReLU(alpha=0.2)(h0)
+	# h0 = BatchNormalization(axis=-1)(h0)
+	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h0)
+	h1 = AddNoise()(h1)
+	h1 = LeakyReLU(alpha=0.2)(h1)
+	# h1 = BatchNormalization(axis=-1)(h1)
+	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h1)
+	h2 = AddNoise()(h2)
+	h2 = LeakyReLU(alpha=0.2)(h2)
+	# h2 = BatchNormalization(axis=-1)(h2)
 	h2 = Flatten()(h2)
 
-	h3 = Dense(512)(h2)
+	h3 = Dense(512, kernel_initializer = 'he_uniform')(h2)
 	# h3 = AddNoise()(h3)
-	h3 = ReLU()(h3)
+	h3 = LeakyReLU(alpha=0.2)(h3)
+	# h3 = BatchNormalization(axis=-1)(h3)
 
-	PI_mu = Dense(NUM_ACTIONS, activation = 'tanh') (h3)
-	PI_var = Dense(NUM_ACTIONS, activation = 'sigmoid') (h3)
+	PI_mu = Dense(NUM_ACTIONS, activation = 'tanh', kernel_initializer = 'glorot_uniform') (h3)
+	PI_var = Dense(NUM_ACTIONS, activation = 'sigmoid', kernel_initializer = 'glorot_uniform') (h3)
 	PI_var = Lambda(lambda x: x * VAR_SCALE)(PI_var)
 	PI = Concatenate(name = 'PI')([PI_mu, PI_var])
 
 	Act = Lambda(lambda x: x[:,:NUM_ACTIONS] + K.sqrt(x[:,NUM_ACTIONS:]) * K.random_normal([K.shape(x)[0], NUM_ACTIONS]), name = 'o_Act')(PI)
-	V = Dense(1, name = 'o_V') (h3)
+	V = Dense(1, name = 'o_V', activation = 'linear') (h3)
 	
 	A = Input(shape = (1,), name = 'Advantage')
 	PI_old = Input(shape = (NUM_ACTIONS * 2,), name = 'Old_Prediction')
@@ -232,16 +241,19 @@ def buildmodel():
 
 def build_discriminator():
 	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Input')
-	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2))(S)
-	h0 = ReLU()(h0)
-	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2))(h0)
-	h1 = ReLU()(h1)
-	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2))(h1)
-	h2 = ReLU()(h2)
+
+	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(S)
+	
+	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(from_color)
+	h0 = LeakyReLU(alpha=0.2)(h0)
+	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h0)
+	h1 = LeakyReLU(alpha=0.2)(h1)
+	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h1)
+	h2 = LeakyReLU(alpha=0.2)(h2)
 	h2 = Flatten()(h2)
 
-	h3 = Dense(512) (h2)
-	h3 = ReLU()(h3)
+	h3 = Dense(512, kernel_initializer = 'he_uniform') (h2)
+	h3 = LeakyReLU(alpha=0.2)(h3)
 
 	out = Dense(1, activation = 'linear')(h3)
 
@@ -262,12 +274,13 @@ def build_discriminator():
 
 #function to preprocess an image before giving as input to the neural network
 def preprocess(image):
-	image = skimage.transform.resize(image, (IMAGE_ROWS, IMAGE_COLS), mode = 'constant') * 2 - 1
-	# if image.min() != image.max(): # Prevent NaNs
-	# 	image = skimage.exposure.rescale_intensity(image, in_range = (0, 1), out_range = (-1, 1))
-	image = image.reshape(1, image.shape[0], image.shape[1], image.shape[2])
+	global img_mean
+	global img_std
+	
+	if image.ndim == 3:
+		image = image.reshape(1, image.shape[0], image.shape[1], image.shape[2])
 
-	return image
+	return (image - img_mean) / img_std
 
 def unison_shuffled_copies(a, b):
     assert len(a) == len(b)
@@ -288,7 +301,9 @@ graph = tf.get_default_graph()
 PI = Model(inputs=model.input, outputs=model.get_layer('PI').output)
 
 (real, _), (_, _) = cifar10.load_data()
-real = real / 255 * 2 - 1
+img_mean = np.mean(real, axis=(0, 1, 2))
+img_std = np.std(real, axis=(0, 1, 2))
+real = (real - img_mean) / img_std
 
 game_state = []
 prev_disc = []
@@ -496,4 +511,5 @@ while True:
 
 	if EPISODE % (20 * EPOCHS) == 0: 
 		model.save("saved_models/model_updates" +	str(EPISODE)) 
+		discriminator.save("saved_models/discrimiator_updates" + str(EPISODE))
 	EPISODE += EPOCHS
