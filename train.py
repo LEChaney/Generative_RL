@@ -40,8 +40,8 @@ import matplotlib.pyplot as plt
 
 GAMMA = 0.99                #discount value
 BETA = 0.01                 #regularisation coefficient
-VAR_SCALE = 0.1
-R_SCALE = 0.1
+VAR_SCALE = 0.2
+R_SCALE = 1e-3
 LAMBDA = 10
 IMAGE_ROWS = 32
 IMAGE_COLS = 32
@@ -51,7 +51,8 @@ TIME_SLICES = 1
 NUM_ACTIONS = 8
 IMAGE_CHANNELS = TIME_SLICES * NUM_CROPS * 3
 LEARNING_RATE_RL = 1e-4
-LEARNING_RATE_DISC = 1e-4
+LEARNING_RATE_DISC = 2e-4
+LEARNING_RATE_CRITC = 1e-4
 LOSS_CLIPPING = 0.2
 LOOK_SPEED = 0.1
 # TEMPERATURE = 0
@@ -139,7 +140,7 @@ def gp_loss(interp_x):
 		gradients_sqr = K.square(gradients)
 		gradients_sqr_sum = K.sum(gradients_sqr, axis = np.arange(1, len(gradients_sqr.shape)))
 		gradient_l2_norm = K.sqrt(gradients_sqr_sum)
-		gradient_penalty = LAMBDA * K.square(1 - gradient_l2_norm)
+		gradient_penalty = LAMBDA * K.square(gradient_l2_norm)
 		gradient_penalty = K.mean(gradient_penalty)
 
 		return gradient_penalty
@@ -229,14 +230,36 @@ def buildmodel():
 	PI = Concatenate(name = 'PI')([PI_mu, PI_var])
 
 	Act = Lambda(lambda x: x[:,:NUM_ACTIONS] + K.sqrt(x[:,NUM_ACTIONS:]) * K.random_normal([K.shape(x)[0], NUM_ACTIONS]), name = 'o_Act')(PI)
-	V = Dense(1, name = 'o_V', activation = 'linear') (h3)
 	
 	A = Input(shape = (1,), name = 'Advantage')
 	PI_old = Input(shape = (NUM_ACTIONS * 2,), name = 'Old_Prediction')
-	model = Model(inputs = [S,A,PI_old], outputs = [Act, V])
+	model = Model(inputs = [S,A,PI_old], outputs = Act)
 	# optimizer = RMSprop(lr = LEARNING_RATE, rho = 0.99, epsilon = 0.1)
 	optimizer = Adam(lr = LEARNING_RATE_RL)
-	model.compile(loss = {'o_Act': ppo_loss(A, PI, PI_old), 'o_V': 'mse'}, loss_weights = {'o_Act': 1., 'o_V' : 1}, optimizer = optimizer)
+	model.compile(loss = ppo_loss(A, PI, PI_old), optimizer = optimizer)
+	return model
+
+def build_critic():
+	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Input')
+
+	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(S)
+	
+	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(from_color)
+	h0 = LeakyReLU(alpha=0.2)(h0)
+	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h0)
+	h1 = LeakyReLU(alpha=0.2)(h1)
+	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h1)
+	h2 = LeakyReLU(alpha=0.2)(h2)
+	h2 = Flatten()(h2)
+
+	h3 = Dense(512, kernel_initializer = 'he_uniform') (h2)
+	h3 = LeakyReLU(alpha=0.2)(h3)
+
+	C = Dense(1, activation = 'linear')(h3)
+
+	model = Model(inputs = S, outputs = C)
+	optimizer = Adam(lr = LEARNING_RATE_CRITC)
+	model.compile(loss = 'mse', optimizer = optimizer)
 	return model
 
 def build_discriminator():
@@ -292,9 +315,11 @@ def sigmoid(X):
 
 # initialize a new model using buildmodel() or use load_model to resume training an already trained model
 model = buildmodel()
+critic = build_critic()
 discriminator, D_train = build_discriminator()
 # model.load_weights("saved_models/model_updates10000")
 model._make_predict_function()
+critic._make_predict_function()
 discriminator._make_predict_function()
 graph = tf.get_default_graph()
 
@@ -338,7 +363,7 @@ def runprocess(thread_id, s_t):
 		# LOOK_SPEED = np.clip(LOOK_SPEED, 0, 0.1)
 
 		with graph.as_default():
-			actions = model.predict([s_t, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])[0][0]
+			actions = model.predict([s_t, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])[0]
 
 		# mu = out[:NUM_ACTIONS]
 		# sigma_sq = out[NUM_ACTIONS:]
@@ -351,11 +376,12 @@ def runprocess(thread_id, s_t):
 		x_t = preprocess(x_t)
 
 		disc_out = discriminator.predict(x_t)[0][0]
-		r_t = R_SCALE * (disc_out - prev_disc[thread_id])
-		prev_disc[thread_id] = disc_out
+		r_t = R_SCALE * disc_out
+		# r_t = R_SCALE * (disc_out - prev_disc[thread_id])
+		# prev_disc[thread_id] = disc_out
 
-		alpha = np.clip(game_state[thread_id].frame_count / (10 * IMAGE_ROWS * IMAGE_COLS), 0, 1)
-		p_term = 1 - (np.clip(r_t, -1, 1) + 1) / 2
+		alpha = np.clip(game_state[thread_id].frame_count / (100 * IMAGE_ROWS * IMAGE_COLS), 0, 1)
+		p_term = 1 - (np.clip(r_t * 10, -1, 1) + 1) / 2
 		p_term = alpha * p_term
 		terminal = np.random.choice([True, False], 1, p=[p_term, 1 - p_term])[0]
 
@@ -366,7 +392,7 @@ def runprocess(thread_id, s_t):
 			prev_disc[thread_id] = discriminator.predict(x_t)[0][0]
 
 		with graph.as_default():
-			critic_reward = model.predict([s_t, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])[1]
+			critic_reward = critic.predict(s_t)
 			pi = PI.predict([s_t, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])
 
 		actions = np.reshape(actions, (1, -1))
@@ -483,7 +509,8 @@ while True:
 	dummy_y = np.zeros((episode_state.shape[0], 1), dtype=np.float32)
 	
 	disc_hist = D_train.fit([real_episode, episode_state], [positive_y, negative_y, dummy_y], callbacks = callbacks_disc, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
-	history = model.fit([episode_state, advantage, episode_pred], {'o_Act': episode_action, 'o_V': episode_r}, callbacks = callbacks_rl, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+	critic_hist = critic.fit(episode_state, episode_r, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+	history = model.fit([episode_state, advantage, episode_pred], episode_action, callbacks = callbacks_rl, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
 
 	episode_r = np.empty((0, 1), dtype=np.float32)
 	episode_pred = np.empty((0, NUM_ACTIONS * 2), dtype=np.float32)
@@ -491,16 +518,10 @@ while True:
 	episode_state = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
 	episode_critic = np.empty((0, 1), dtype=np.float32)
 
-	f = open("rewards.txt","a")
-	f.write("Update: " + str(EPISODE) + ", Reward_mean: " + str(e_mean) + ", Loss: " + str(history.history['loss'][-1]) + " Discriminator Loss: " + str(disc_hist.history['loss'][-1]) + "\n")
-	f.close()
-	print("Update: " + str(EPISODE) + ", Reward_mean: " + str(e_mean) + ", Loss: " + str(history.history['loss'][-1]) + " Discriminator Loss: " + str(disc_hist.history['loss'][-1]))
-
 	summary = tf.Summary(value=[
 		tf.Summary.Value(tag="reward mean", simple_value=float(e_mean)),
-		tf.Summary.Value(tag="total loss", simple_value=float(history.history['loss'][-1])),
-		tf.Summary.Value(tag="action loss", simple_value=float(history.history['o_Act_loss'][-1])),
-		tf.Summary.Value(tag="critic loss", simple_value=float(history.history['o_V_loss'][-1])),
+		tf.Summary.Value(tag="action loss", simple_value=float(history.history['loss'][-1])),
+		tf.Summary.Value(tag="critic loss", simple_value=float(critic_hist.history['loss'][-1])),
 		tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_hist.history['loss'][-1])),
 		tf.Summary.Value(tag="real loss", simple_value=float(disc_hist.history['real_out_loss'][-1])),
 		tf.Summary.Value(tag="fake loss", simple_value=float(disc_hist.history['fake_out_loss'][-1])),
@@ -512,4 +533,5 @@ while True:
 	if EPISODE % (20 * EPOCHS) == 0: 
 		model.save("saved_models/model_updates" +	str(EPISODE)) 
 		discriminator.save("saved_models/discrimiator_updates" + str(EPISODE))
+		critic.save("saved_models/critic_updates", str(EPISODE))
 	EPISODE += EPOCHS
