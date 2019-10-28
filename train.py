@@ -50,8 +50,8 @@ NUM_CROPS = 1
 TIME_SLICES = 1
 NUM_ACTIONS = 8
 IMAGE_CHANNELS = TIME_SLICES * NUM_CROPS * 3
-LEARNING_RATE_RL = 5e-5
-LEARNING_RATE_DISC = 5e-5
+LEARNING_RATE_RL = 1e-4
+LEARNING_RATE_DISC = 1e-4
 LOSS_CLIPPING = 0.2
 LOOK_SPEED = 0.1
 # TEMPERATURE = 0
@@ -205,15 +205,15 @@ def buildmodel():
 	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(S)
 
 	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(from_color)
-	h0 = AddNoise()(h0)
+	# h0 = AddNoise()(h0)
 	h0 = LeakyReLU(alpha=0.2)(h0)
 	# h0 = BatchNormalization(axis=-1)(h0)
 	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h0)
-	h1 = AddNoise()(h1)
+	# h1 = AddNoise()(h1)
 	h1 = LeakyReLU(alpha=0.2)(h1)
 	# h1 = BatchNormalization(axis=-1)(h1)
 	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h1)
-	h2 = AddNoise()(h2)
+	# h2 = AddNoise()(h2)
 	h2 = LeakyReLU(alpha=0.2)(h2)
 	# h2 = BatchNormalization(axis=-1)(h2)
 	h2 = Flatten()(h2)
