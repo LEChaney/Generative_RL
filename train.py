@@ -38,8 +38,8 @@ import math
 import matplotlib.pyplot as plt
 
 GAMMA = 0.99                #discount value
-BETA = 0.01                 #regularisation coefficient
-VAR_SCALE = 1
+BETA = 0.00                 #regularisation coefficient
+VAR_SCALE = 0.5
 R_SCALE = 0.1
 LAMBDA = 10
 IMAGE_ROWS = 32
