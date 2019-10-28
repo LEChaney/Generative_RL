@@ -1,0 +1,13 @@
+# ignore all pyc files.
+*.pyc
+
+saved_models/
+logs/
+
+__pycache__/
+
+.vscode/
+
+Thumbs.db
+
+rewards.txt
