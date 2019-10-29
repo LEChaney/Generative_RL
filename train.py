@@ -40,7 +40,7 @@ import matplotlib.pyplot as plt
 
 GAMMA = 0.99                #discount value
 BETA = 0.01                 #regularisation coefficient
-VAR_SCALE = 0.1
+VAR_SCALE = 0.2
 R_SCALE = 0.1
 LAMBDA = 1
 IMAGE_ROWS = 28
@@ -48,20 +48,21 @@ IMAGE_COLS = 28
 ZOOM = 2
 NUM_CROPS = 1
 TIME_SLICES = 1
-NUM_ACTIONS = 6
+NUM_ACTIONS = 2
 IMAGE_CHANNELS = TIME_SLICES * NUM_CROPS
 LEARNING_RATE_RL = 1e-4
 LEARNING_RATE_DISC = 2e-4
 LEARNING_RATE_CRITC = 1e-4
 LOSS_CLIPPING = 0.2
 LOOK_SPEED = 0.1
-FRAMES_TO_PRETRAIN_DISC = 10000
+FRAMES_TO_PRETRAIN_DISC = 0
 HORIZON = 75
 TIME_SIG_GAIN = 75
+INPUT_GAIN = 1
 # TEMPERATURE = 0
 # TEMP_INCR = 1e-6
 
-EPOCHS = 3
+EPOCHS = 1
 THREADS = 16
 T_MAX = 15
 BATCH_SIZE = 80
@@ -209,8 +210,9 @@ def buildmodel():
 	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Input')
 	Ref = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Ref_Image')
 	# In = Concatenate()([S, Ref])
+	In = Lambda(lambda x: x * INPUT_GAIN)(S)
 
-	from_color = CoordinateChannel2D()(S)
+	from_color = CoordinateChannel2D()(In)
 	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(from_color)
 
 	h0 = CoordinateChannel2D()(from_color)
@@ -235,7 +237,7 @@ def buildmodel():
 	h3 = LeakyReLU(alpha=0.2)(h3)
 	# h3 = BatchNormalization(axis=-1)(h3)
 
-	PI_mu = Dense(NUM_ACTIONS, activation = 'tanh', kernel_initializer = 'glorot_uniform') (h3)
+	PI_mu = Dense(NUM_ACTIONS, activation = 'linear', kernel_initializer = 'glorot_uniform') (h3)
 	PI_var = Dense(NUM_ACTIONS, activation = 'sigmoid', kernel_initializer = 'glorot_uniform') (h3)
 	PI_var = Lambda(lambda x: x * VAR_SCALE)(PI_var)
 	PI = Concatenate(name = 'PI')([PI_mu, PI_var])
@@ -254,13 +256,17 @@ def build_critic():
 	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Input')
 	T = Input(shape = (1,), name = 'Time_Signal')
 
-	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(S)
+	from_color = CoordinateChannel2D()(S)
+	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(from_color)
 	
-	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(from_color)
+	h0 = CoordinateChannel2D()(from_color)
+	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h0)
 	h0 = LeakyReLU(alpha=0.2)(h0)
-	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h0)
+	h1 = CoordinateChannel2D()(h0)
+	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h1)
 	h1 = LeakyReLU(alpha=0.2)(h1)
-	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h1)
+	h2 = CoordinateChannel2D()(h1)
+	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h2)
 	h2 = LeakyReLU(alpha=0.2)(h2)
 	h2 = Flatten()(h2)
 
@@ -279,13 +285,17 @@ def build_critic():
 def build_discriminator():
 	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Input')
 
-	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(S)
+	from_color = CoordinateChannel2D()(S)
+	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(from_color)
 	
-	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(from_color)
+	h0 = CoordinateChannel2D()(from_color)
+	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h0)
 	h0 = LeakyReLU(alpha=0.2)(h0)
-	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h0)
+	h1 = CoordinateChannel2D()(h0)
+	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h1)
 	h1 = LeakyReLU(alpha=0.2)(h1)
-	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h1)
+	h2 = CoordinateChannel2D()(h1)
+	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h2)
 	h2 = LeakyReLU(alpha=0.2)(h2)
 	h2 = Flatten()(h2)
 
@@ -406,7 +416,7 @@ def runprocess(thread_id, s_t, ref_image):
 		x_t = preprocess(x_t)
 
 		d_g = discriminator.predict(x_t)[0][0]
-		# d_r = discriminator.predict(ref_image)[0][0]
+		d_r = discriminator.predict(ref_image)[0][0]
 		r_t = R_SCALE * d_g
 		# r_t = R_SCALE * (d_g - prev_disc[thread_id])
 		# prev_disc[thread_id] = d_g
@@ -552,8 +562,9 @@ while True:
 	if T < FRAMES_TO_PRETRAIN_DISC:
 		disc_hist = D_train.fit([real_episode, episode_state], [positive_y, negative_y, dummy_y], callbacks = callbacks_disc, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
 	else:
-		disc_eval = D_train.evaluate([real_episode, episode_state], [positive_y, negative_y, dummy_y], batch_size = episode_state.shape[0])
-		critic_hist = critic.fit([episode_state, episode_time], episode_r, epochs = EPISODE + EPOCHS // 2, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+		# disc_eval = D_train.evaluate([real_episode, episode_state], [positive_y, negative_y, dummy_y], batch_size = episode_state.shape[0])
+		disc_hist = D_train.fit([real_episode, episode_state], [positive_y, negative_y, dummy_y], callbacks = callbacks_disc, epochs = EPISODE + EPOCHS * 3, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+		critic_hist = critic.fit([episode_state, episode_time], episode_r, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
 		history = model.fit([episode_state, episode_refs, advantage, episode_pred], episode_action, callbacks = callbacks_rl, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
 
 	episode_r = np.empty((0, 1), dtype=np.float32)
@@ -569,14 +580,14 @@ while True:
 			tf.Summary.Value(tag="reward mean", simple_value=float(e_mean)),
 			tf.Summary.Value(tag="action loss", simple_value=float(history.history['loss'][-1])),
 			tf.Summary.Value(tag="critic loss", simple_value=float(critic_hist.history['loss'][-1])),
-			tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_eval[0])),
-			tf.Summary.Value(tag="real loss", simple_value=float(disc_eval[1])),
-			tf.Summary.Value(tag="fake loss", simple_value=float(disc_eval[2])),
-			tf.Summary.Value(tag="gradient penalty loss", simple_value=float(disc_eval[3])),
-			# tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_hist.history['loss'][-1])),
-			# tf.Summary.Value(tag="real loss", simple_value=float(disc_hist.history['real_out_loss'][-1])),
-			# tf.Summary.Value(tag="fake loss", simple_value=float(disc_hist.history['fake_out_loss'][-1])),
-			# tf.Summary.Value(tag="gradient penalty loss", simple_value=float(disc_hist.history['interp_out_loss'][-1])),
+			# tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_eval[0])),
+			# tf.Summary.Value(tag="real loss", simple_value=float(disc_eval[1])),
+			# tf.Summary.Value(tag="fake loss", simple_value=float(disc_eval[2])),
+			# tf.Summary.Value(tag="gradient penalty loss", simple_value=float(disc_eval[3])),
+			tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_hist.history['loss'][-1])),
+			tf.Summary.Value(tag="real loss", simple_value=float(disc_hist.history['real_out_loss'][-1])),
+			tf.Summary.Value(tag="fake loss", simple_value=float(disc_hist.history['fake_out_loss'][-1])),
+			tf.Summary.Value(tag="gradient penalty loss", simple_value=float(disc_hist.history['interp_out_loss'][-1])),
 			# tf.Summary.Value(tag="max score", simple_value=float(max_score))
 		])
 		summary_writer.add_summary(summary, EPISODE)
