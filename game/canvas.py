@@ -28,16 +28,19 @@ class GameState:
     def frame_step(self, input_actions):
         self.frame_count += 1
 
-        x, y = (input_actions + 1) / 2
-        x = int(x * WIDTH_PIXELS)
-        y = int(y * HEIGHT_PIXELS)
+        x1, y1, x2, y2 = (input_actions + 1) / 2
+        x1 = int(x1 * WIDTH_PIXELS)
+        y1 = int(y1 * HEIGHT_PIXELS)
+        x2 = int(x2 * WIDTH_PIXELS)
+        y2 = int(y2 * HEIGHT_PIXELS)
         # width = max(width * R * WIDTH_PIXELS, 1)
         # height = max(height * R * HEIGHT_PIXELS, 1)
         # r, g, b = 255 * np.clip(np.array([i, i, i]), 0, 1)
         # orientation = input_actions[-1]
         # orientation = orientation * 180
         
-        pygame.draw.rect(self.surface, (255, 255, 255), Rect(x, y, 1, 1))
+        pygame.draw.line(self.surface, (255, 255, 255), (x1, y1), (x2, y2))
+        # pygame.draw.rect(self.surface, (255, 255, 255), Rect(x, y, 1, 1))
         # paint_area = pygame.surface.Surface((width, height), pygame.SRCALPHA)
         # pygame.draw.ellipse(paint_area, (r, g, b), Rect(0, 0, width, height))
         # paint_area = pygame.transform.rotate(paint_area, orientation)

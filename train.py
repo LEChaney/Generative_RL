@@ -41,14 +41,14 @@ import matplotlib.pyplot as plt
 GAMMA = 0.99                #discount value
 BETA = 0.01                 #regularisation coefficient
 VAR_SCALE = 0.2
-R_SCALE = 0.1
+R_SCALE = 0.01
 LAMBDA = 1
 IMAGE_ROWS = 28
 IMAGE_COLS = 28
 ZOOM = 2
 NUM_CROPS = 1
 TIME_SLICES = 1
-NUM_ACTIONS = 2
+NUM_ACTIONS = 4
 IMAGE_CHANNELS = TIME_SLICES * NUM_CROPS
 LEARNING_RATE_RL = 1e-4
 LEARNING_RATE_DISC = 2e-4
@@ -56,7 +56,6 @@ LEARNING_RATE_CRITC = 1e-4
 LOSS_CLIPPING = 0.2
 LOOK_SPEED = 0.1
 FRAMES_TO_PRETRAIN_DISC = 0
-HORIZON = 75
 TIME_SIG_GAIN = 75
 INPUT_GAIN = 1
 # TEMPERATURE = 0
@@ -68,6 +67,7 @@ T_MAX = 15
 BATCH_SIZE = 80
 T = 0
 EPISODE = 0
+HORIZON = 15
 
 episode_r = np.empty((0, 1), dtype=np.float32)
 episode_time = np.zeros((0, 1))
@@ -209,8 +209,9 @@ class AddNoise(Layer):
 def buildmodel():
 	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Input')
 	Ref = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Ref_Image')
-	# In = Concatenate()([S, Ref])
-	In = Lambda(lambda x: x * INPUT_GAIN)(S)
+
+	In = Concatenate()([S, Ref])
+	In = Lambda(lambda x: x * INPUT_GAIN)(In)
 
 	from_color = CoordinateChannel2D()(In)
 	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(from_color)
@@ -254,9 +255,13 @@ def buildmodel():
 
 def build_critic():
 	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Input')
+	Ref = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Ref_Image')
 	T = Input(shape = (1,), name = 'Time_Signal')
+	
+	In = Concatenate()([S, Ref])
+	In = Lambda(lambda x: x * INPUT_GAIN)(In)
 
-	from_color = CoordinateChannel2D()(S)
+	from_color = CoordinateChannel2D()(In)
 	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(from_color)
 	
 	h0 = CoordinateChannel2D()(from_color)
@@ -277,7 +282,7 @@ def build_critic():
 
 	C = Dense(1, activation = 'linear')(h3)
 
-	model = Model(inputs = [S, T], outputs = C)
+	model = Model(inputs = [S, Ref, T], outputs = C)
 	optimizer = Adam(lr = LEARNING_RATE_CRITC)
 	model.compile(loss = 'mse', optimizer = optimizer)
 	return model
@@ -387,7 +392,6 @@ def runprocess(thread_id, s_t, ref_image):
 	critic_store = np.empty((0, 1), dtype=np.float32)
 
 	s_t = s_t.reshape(1, s_t.shape[0], s_t.shape[1], s_t.shape[2])
-	ref_image = ref_image.reshape(1, ref_image.shape[0], ref_image.shape[1], ref_image.shape[2])
 
 	while t-t_start < T_MAX and terminal == False:
 		t += 1
@@ -401,7 +405,7 @@ def runprocess(thread_id, s_t, ref_image):
 		# time_sig = np.array(time).reshape(1, 1)
 
 		with graph.as_default():
-			critic_reward = critic.predict([s_t, time_sig])
+			critic_reward = critic.predict([s_t, ref_image, time_sig])
 			pi = PI.predict([s_t, ref_image, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])
 			actions = model.predict([s_t, ref_image, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])[0]
 
@@ -415,9 +419,11 @@ def runprocess(thread_id, s_t, ref_image):
 
 		x_t = preprocess(x_t)
 
-		d_g = discriminator.predict(x_t)[0][0]
-		d_r = discriminator.predict(ref_image)[0][0]
-		r_t = R_SCALE * d_g
+		mse = np.mean(np.square(x_t - ref_image))
+		r_t = -mse
+		# d_g = discriminator.predict(x_t)[0][0]
+		# d_r = discriminator.predict(ref_image)[0][0]
+		# r_t = R_SCALE * d_g
 		# r_t = R_SCALE * (d_g - prev_disc[thread_id])
 		# prev_disc[thread_id] = d_g
 
@@ -559,13 +565,13 @@ while True:
 	positive_y = np.ones((episode_state.shape[0], 1), dtype=np.float32)
 	negative_y = -positive_y
 	dummy_y = np.zeros((episode_state.shape[0], 1), dtype=np.float32)
-	if T < FRAMES_TO_PRETRAIN_DISC:
-		disc_hist = D_train.fit([real_episode, episode_state], [positive_y, negative_y, dummy_y], callbacks = callbacks_disc, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
-	else:
+	# if T < FRAMES_TO_PRETRAIN_DISC:
+	# 	disc_hist = D_train.fit([real_episode, episode_state], [positive_y, negative_y, dummy_y], callbacks = callbacks_disc, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+	# else:
 		# disc_eval = D_train.evaluate([real_episode, episode_state], [positive_y, negative_y, dummy_y], batch_size = episode_state.shape[0])
-		disc_hist = D_train.fit([real_episode, episode_state], [positive_y, negative_y, dummy_y], callbacks = callbacks_disc, epochs = EPISODE + EPOCHS * 3, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
-		critic_hist = critic.fit([episode_state, episode_time], episode_r, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
-		history = model.fit([episode_state, episode_refs, advantage, episode_pred], episode_action, callbacks = callbacks_rl, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+		# disc_hist = D_train.fit([real_episode, episode_state], [positive_y, negative_y, dummy_y], callbacks = callbacks_disc, epochs = EPISODE + EPOCHS * 3, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+	critic_hist = critic.fit([episode_state, episode_refs, episode_time], episode_r, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+	history = model.fit([episode_state, episode_refs, advantage, episode_pred], episode_action, callbacks = callbacks_rl, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
 
 	episode_r = np.empty((0, 1), dtype=np.float32)
 	episode_pred = np.empty((0, NUM_ACTIONS * 2), dtype=np.float32)
@@ -584,10 +590,10 @@ while True:
 			# tf.Summary.Value(tag="real loss", simple_value=float(disc_eval[1])),
 			# tf.Summary.Value(tag="fake loss", simple_value=float(disc_eval[2])),
 			# tf.Summary.Value(tag="gradient penalty loss", simple_value=float(disc_eval[3])),
-			tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_hist.history['loss'][-1])),
-			tf.Summary.Value(tag="real loss", simple_value=float(disc_hist.history['real_out_loss'][-1])),
-			tf.Summary.Value(tag="fake loss", simple_value=float(disc_hist.history['fake_out_loss'][-1])),
-			tf.Summary.Value(tag="gradient penalty loss", simple_value=float(disc_hist.history['interp_out_loss'][-1])),
+			# tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_hist.history['loss'][-1])),
+			# tf.Summary.Value(tag="real loss", simple_value=float(disc_hist.history['real_out_loss'][-1])),
+			# tf.Summary.Value(tag="fake loss", simple_value=float(disc_hist.history['fake_out_loss'][-1])),
+			# tf.Summary.Value(tag="gradient penalty loss", simple_value=float(disc_hist.history['interp_out_loss'][-1])),
 			# tf.Summary.Value(tag="max score", simple_value=float(max_score))
 		])
 		summary_writer.add_summary(summary, EPISODE)
