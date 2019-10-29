@@ -7,11 +7,11 @@ from pygame.locals import *
 from itertools import cycle
 import skimage
 
-WIDTH_PIXELS  = 28  #use 256 (power of 2)
-HEIGHT_PIXELS = 28
+WIDTH_PIXELS  = 32  #use 256 (power of 2)
+HEIGHT_PIXELS = 32
 SCREEN_WIDTH = 128
 SCREEN_HEIGHT = 128
-BACKGROUND_COLOR = (0,0,0)
+BACKGROUND_COLOR = (119,119,119)
 R = 1/np.cos(np.pi/4)
 
 pygame.init()
@@ -28,24 +28,22 @@ class GameState:
     def frame_step(self, input_actions):
         self.frame_count += 1
 
-        x1, y1, x2, y2 = (input_actions + 1) / 2
-        x1 = int(x1 * WIDTH_PIXELS)
-        y1 = int(y1 * HEIGHT_PIXELS)
-        x2 = int(x2 * WIDTH_PIXELS)
-        y2 = int(y2 * HEIGHT_PIXELS)
-        # width = max(width * R * WIDTH_PIXELS, 1)
-        # height = max(height * R * HEIGHT_PIXELS, 1)
-        # r, g, b = 255 * np.clip(np.array([i, i, i]), 0, 1)
-        # orientation = input_actions[-1]
-        # orientation = orientation * 180
+        x, y, r, g, b, width, height = (input_actions[:-1] + 1) / 2
+        orientation = input_actions[-1]
+        orientation = orientation * 180
+        x = int(x * WIDTH_PIXELS)
+        y = int(y * HEIGHT_PIXELS)
+        width = max(width * R * WIDTH_PIXELS, 1)
+        height = max(height * R * HEIGHT_PIXELS, 1)
+        r, g, b = 255 * np.clip((r, g, b), 0, 1)
         
-        pygame.draw.line(self.surface, (255, 255, 255), (x1, y1), (x2, y2))
+        # pygame.draw.line(self.surface, (l, l, l), (x1, y1), (x2, y2))
         # pygame.draw.rect(self.surface, (255, 255, 255), Rect(x, y, 1, 1))
-        # paint_area = pygame.surface.Surface((width, height), pygame.SRCALPHA)
-        # pygame.draw.ellipse(paint_area, (r, g, b), Rect(0, 0, width, height))
-        # paint_area = pygame.transform.rotate(paint_area, orientation)
-        # paint_dest = paint_area.get_rect(center=(x, y))
-        # self.surface.blit(paint_area, paint_dest)
+        paint_area = pygame.surface.Surface((width, height), pygame.SRCALPHA)
+        pygame.draw.ellipse(paint_area, (r, g, b), Rect(0, 0, width, height))
+        paint_area = pygame.transform.rotate(paint_area, orientation)
+        paint_dest = paint_area.get_rect(center=(x, y))
+        self.surface.blit(paint_area, paint_dest)
 
         image_data = pygame.surfarray.array3d(self.surface)
         image_data = np.transpose(image_data, axes=[1, 0, 2])

@@ -19,7 +19,7 @@ from keras.optimizers import RMSprop, Adam
 import keras.backend as K
 from keras.backend.tensorflow_backend import set_session
 from keras.callbacks import LearningRateScheduler, History
-from keras.datasets import mnist
+from keras.datasets import mnist, cifar10
 import tensorflow as tf
 
 from keras.layers import Lambda
@@ -40,34 +40,37 @@ import matplotlib.pyplot as plt
 
 GAMMA = 0.99                #discount value
 BETA = 0.01                 #regularisation coefficient
-VAR_SCALE = 0.2
-R_SCALE = 0.01
+VAR_SCALE = 1
+# R_SCALE = 0.01
 LAMBDA = 1
-IMAGE_ROWS = 28
-IMAGE_COLS = 28
-ZOOM = 2
-NUM_CROPS = 1
+IMAGE_ROWS = 32
+IMAGE_COLS = 32
 TIME_SLICES = 1
-NUM_ACTIONS = 4
-IMAGE_CHANNELS = TIME_SLICES * NUM_CROPS
-LEARNING_RATE_RL = 1e-4
+NUM_ACTIONS = 8
+IMAGE_CHANNELS = TIME_SLICES * 3
+LEARNING_RATE_RL = 2e-4
 LEARNING_RATE_DISC = 2e-4
-LEARNING_RATE_CRITC = 1e-4
+LEARNING_RATE_CRITC = 2e-4
 LOSS_CLIPPING = 0.2
-LOOK_SPEED = 0.1
 FRAMES_TO_PRETRAIN_DISC = 0
 TIME_SIG_GAIN = 75
 INPUT_GAIN = 1
 # TEMPERATURE = 0
 # TEMP_INCR = 1e-6
 
-EPOCHS = 1
+EPOCHS = 3
 THREADS = 16
 T_MAX = 15
 BATCH_SIZE = 80
 T = 0
 EPISODE = 0
-HORIZON = 15
+HORIZON = T_MAX * 100
+
+(real, _), (_, _) = cifar10.load_data()
+real = real.reshape(-1, IMAGE_COLS, IMAGE_ROWS, IMAGE_CHANNELS)
+img_mean = np.mean(real, axis=(0, 1, 2))
+img_std = np.std(real, axis=(0, 1, 2))
+real = (real - img_mean) / img_std
 
 episode_r = np.empty((0, 1), dtype=np.float32)
 episode_time = np.zeros((0, 1))
@@ -238,7 +241,7 @@ def buildmodel():
 	h3 = LeakyReLU(alpha=0.2)(h3)
 	# h3 = BatchNormalization(axis=-1)(h3)
 
-	PI_mu = Dense(NUM_ACTIONS, activation = 'linear', kernel_initializer = 'glorot_uniform') (h3)
+	PI_mu = Dense(NUM_ACTIONS, activation = 'tanh', kernel_initializer = 'glorot_uniform') (h3)
 	PI_var = Dense(NUM_ACTIONS, activation = 'sigmoid', kernel_initializer = 'glorot_uniform') (h3)
 	PI_var = Lambda(lambda x: x * VAR_SCALE)(PI_var)
 	PI = Concatenate(name = 'PI')([PI_mu, PI_var])
@@ -357,17 +360,11 @@ graph = tf.get_default_graph()
 
 PI = Model(inputs=model.input, outputs=model.get_layer('PI').output)
 
-(real, _), (_, _) = mnist.load_data()
-real = real.reshape(-1, IMAGE_COLS, IMAGE_ROWS, IMAGE_CHANNELS)
-img_mean = np.mean(real, axis=(0, 1, 2))
-img_std = np.std(real, axis=(0, 1, 2))
-real = (real - img_mean) / img_std
-
 game_state = []
 prev_disc = []
 # max_score = 0
 for i in range(0,THREADS):
-	game_state.append(game.GameState(30000))
+	game_state.append(game.GameState(1000000))
 	current_frame = game_state[i].get_current_frame()
 	current_frame = preprocess(current_frame)
 	prev_disc.append(discriminator.predict(current_frame)[0][0])
@@ -392,30 +389,21 @@ def runprocess(thread_id, s_t, ref_image):
 	critic_store = np.empty((0, 1), dtype=np.float32)
 
 	s_t = s_t.reshape(1, s_t.shape[0], s_t.shape[1], s_t.shape[2])
+	ref_image = np.expand_dims(ref_image, 0)
 
 	while t-t_start < T_MAX and terminal == False:
 		t += 1
 		T += 1
-		# LOOK_SPEED += TEMP_INCR
-		# LOOK_SPEED = np.clip(LOOK_SPEED, 0, 0.1)
 
-		ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0)
 		time = game_state[thread_id].frame_count
 		time_sig = TIME_SIG_GAIN * np.array(time / (HORIZON - 1) - 0.5).reshape(1, 1)
-		# time_sig = np.array(time).reshape(1, 1)
 
 		with graph.as_default():
 			critic_reward = critic.predict([s_t, ref_image, time_sig])
 			pi = PI.predict([s_t, ref_image, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])
 			actions = model.predict([s_t, ref_image, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])[0]
 
-		# mu = out[:NUM_ACTIONS]
-		# sigma_sq = out[NUM_ACTIONS:]
-		# eps = np.random.randn(mu.shape[0])
-		# actions = mu + np.sqrt(sigma_sq) * eps
-
 		x_t = game_state[thread_id].frame_step(actions)
-		# max_score = max(max_score, game_state[thread_id].score)
 
 		x_t = preprocess(x_t)
 
@@ -427,12 +415,12 @@ def runprocess(thread_id, s_t, ref_image):
 		# r_t = R_SCALE * (d_g - prev_disc[thread_id])
 		# prev_disc[thread_id] = d_g
 
-		# alpha = np.clip(time_sig / (2 * T_MAX), 0, 1)
-		# p_term = 1 - np.clip((r_t + 1) / 2, 0.01, 0.99)
-		# p_term = alpha * p_term
-		# terminal = np.random.choice([True, False], 1, p=[p_term, 1 - p_term])[0]
-		if (time + 1) >= HORIZON:
-			terminal = True
+		alpha = np.clip(time / (HORIZON), 0, 1)
+		p_term = np.clip(-r_t * 0.2, 1 / HORIZON, 1 - 1 / HORIZON)
+		p_term = alpha * p_term
+		terminal = np.random.choice([True, False], 1, p=[p_term, 1 - p_term])[0]
+		# if (time + 1) >= HORIZON:
+		# 	terminal = True
 
 		if terminal:
 			game_state[thread_id].reset()
