@@ -7,10 +7,11 @@ from pygame.locals import *
 from itertools import cycle
 import skimage
 
-WIDTH_PIXELS  = 32  #use 256 (power of 2)
-HEIGHT_PIXELS = 32
+WIDTH_PIXELS  = 28  #use 256 (power of 2)
+HEIGHT_PIXELS = 28
 SCREEN_WIDTH = 128
 SCREEN_HEIGHT = 128
+BACKGROUND_COLOR = (0,0,0)
 R = 1/np.cos(np.pi/4)
 
 pygame.init()
@@ -27,14 +28,14 @@ class GameState:
     def frame_step(self, input_actions):
         self.frame_count += 1
 
-        x, y, width, height, r, g, b = (np.clip(input_actions[:-1], -1, 1) + 1) / 2
+        x, y, width, height, i = (np.clip(input_actions[:-1], -1, 1) + 1) / 2
         x = x * WIDTH_PIXELS
         y = y * HEIGHT_PIXELS
         width = 1 + width * R * WIDTH_PIXELS
         height = 1 + height * R * HEIGHT_PIXELS
-        r, g, b = 255 * np.array([r, g, b])
-        orientation = np.clip(input_actions[-1], -1, 1)
-        orientation = orientation * 45
+        r, g, b = 255 * np.array([i, i, i])
+        orientation = input_actions[-1]
+        orientation = orientation * 180
         
         paint_area = pygame.surface.Surface((width, height), pygame.SRCALPHA)
         pygame.draw.ellipse(paint_area, (r, g, b), Rect(0, 0, width, height))
@@ -60,7 +61,7 @@ class GameState:
 
     def reset(self):
         self.frame_count = 0
-        self.surface.fill((119,119,119))
+        self.surface.fill(BACKGROUND_COLOR)
         scaled = pygame.transform.scale(self.surface, [SCREEN_WIDTH, SCREEN_HEIGHT])
         SCREEN.blit(scaled, (0, 0))
         pygame.display.update()

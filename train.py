@@ -19,7 +19,7 @@ from keras.optimizers import RMSprop, Adam
 import keras.backend as K
 from keras.backend.tensorflow_backend import set_session
 from keras.callbacks import LearningRateScheduler, History
-from keras.datasets import cifar10
+from keras.datasets import mnist
 import tensorflow as tf
 
 from keras.layers import Lambda
@@ -40,21 +40,24 @@ import matplotlib.pyplot as plt
 
 GAMMA = 0.99                #discount value
 BETA = 0.01                 #regularisation coefficient
-VAR_SCALE = 0.2
-R_SCALE = 1e-3
-LAMBDA = 10
-IMAGE_ROWS = 32
-IMAGE_COLS = 32
+VAR_SCALE = 0.1
+R_SCALE = 0.1
+LAMBDA = 1
+IMAGE_ROWS = 28
+IMAGE_COLS = 28
 ZOOM = 2
 NUM_CROPS = 1
 TIME_SLICES = 1
-NUM_ACTIONS = 8
-IMAGE_CHANNELS = TIME_SLICES * NUM_CROPS * 3
+NUM_ACTIONS = 6
+IMAGE_CHANNELS = TIME_SLICES * NUM_CROPS
 LEARNING_RATE_RL = 1e-4
 LEARNING_RATE_DISC = 2e-4
 LEARNING_RATE_CRITC = 1e-4
 LOSS_CLIPPING = 0.2
 LOOK_SPEED = 0.1
+FRAMES_TO_PRETRAIN_DISC = 10000
+HORIZON = 75
+TIME_SIG_GAIN = 75
 # TEMPERATURE = 0
 # TEMP_INCR = 1e-6
 
@@ -66,7 +69,9 @@ T = 0
 EPISODE = 0
 
 episode_r = np.empty((0, 1), dtype=np.float32)
+episode_time = np.zeros((0, 1))
 episode_state = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
+episode_refs = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
 episode_action = np.empty((0, NUM_ACTIONS), dtype=np.float32)
 episode_pred = np.empty((0, NUM_ACTIONS * 2), dtype=np.float32)
 episode_critic = np.empty((0, 1), dtype=np.float32)
@@ -147,7 +152,7 @@ def gp_loss(interp_x):
 	return gp_loss_internal
 
 def wasserstein_loss(y_true, y_pred):
-	return -K.mean(y_true * y_pred)
+	return -K.mean(y_true * y_pred) # -(D(X) - D(G))
 
 #loss function for critic output
 # def sumofsquares(y_true, y_pred):        #critic loss
@@ -202,18 +207,24 @@ class AddNoise(Layer):
 #function buildmodel() to define the structure of the neural network in use 
 def buildmodel():
 	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Input')
+	Ref = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Ref_Image')
+	# In = Concatenate()([S, Ref])
 
-	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(S)
+	from_color = CoordinateChannel2D()(S)
+	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(from_color)
 
-	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(from_color)
+	h0 = CoordinateChannel2D()(from_color)
+	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h0)
 	# h0 = AddNoise()(h0)
 	h0 = LeakyReLU(alpha=0.2)(h0)
 	# h0 = BatchNormalization(axis=-1)(h0)
-	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h0)
+	h1 = CoordinateChannel2D()(h0)
+	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h1)
 	# h1 = AddNoise()(h1)
 	h1 = LeakyReLU(alpha=0.2)(h1)
 	# h1 = BatchNormalization(axis=-1)(h1)
-	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h1)
+	h2 = CoordinateChannel2D()(h1)
+	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h2)
 	# h2 = AddNoise()(h2)
 	h2 = LeakyReLU(alpha=0.2)(h2)
 	# h2 = BatchNormalization(axis=-1)(h2)
@@ -233,7 +244,7 @@ def buildmodel():
 	
 	A = Input(shape = (1,), name = 'Advantage')
 	PI_old = Input(shape = (NUM_ACTIONS * 2,), name = 'Old_Prediction')
-	model = Model(inputs = [S,A,PI_old], outputs = Act)
+	model = Model(inputs = [S,Ref,A,PI_old], outputs = Act)
 	# optimizer = RMSprop(lr = LEARNING_RATE, rho = 0.99, epsilon = 0.1)
 	optimizer = Adam(lr = LEARNING_RATE_RL)
 	model.compile(loss = ppo_loss(A, PI, PI_old), optimizer = optimizer)
@@ -241,6 +252,7 @@ def buildmodel():
 
 def build_critic():
 	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Input')
+	T = Input(shape = (1,), name = 'Time_Signal')
 
 	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(S)
 	
@@ -252,12 +264,14 @@ def build_critic():
 	h2 = LeakyReLU(alpha=0.2)(h2)
 	h2 = Flatten()(h2)
 
+	h2 = Concatenate()([h2, T])
+
 	h3 = Dense(512, kernel_initializer = 'he_uniform') (h2)
 	h3 = LeakyReLU(alpha=0.2)(h3)
 
 	C = Dense(1, activation = 'linear')(h3)
 
-	model = Model(inputs = S, outputs = C)
+	model = Model(inputs = [S, T], outputs = C)
 	optimizer = Adam(lr = LEARNING_RATE_CRITC)
 	model.compile(loss = 'mse', optimizer = optimizer)
 	return model
@@ -302,6 +316,9 @@ def preprocess(image):
 	
 	if image.ndim == 3:
 		image = image.reshape(1, image.shape[0], image.shape[1], image.shape[2])
+	
+	if image.shape[-1] > IMAGE_CHANNELS:
+		image = np.mean(image, axis=-1, keepdims=True)
 
 	return (image - img_mean) / img_std
 
@@ -325,7 +342,8 @@ graph = tf.get_default_graph()
 
 PI = Model(inputs=model.input, outputs=model.get_layer('PI').output)
 
-(real, _), (_, _) = cifar10.load_data()
+(real, _), (_, _) = mnist.load_data()
+real = real.reshape(-1, IMAGE_COLS, IMAGE_ROWS, IMAGE_CHANNELS)
 img_mean = np.mean(real, axis=(0, 1, 2))
 img_std = np.std(real, axis=(0, 1, 2))
 real = (real - img_mean) / img_std
@@ -339,10 +357,11 @@ for i in range(0,THREADS):
 	current_frame = preprocess(current_frame)
 	prev_disc.append(discriminator.predict(current_frame)[0][0])
 
-def runprocess(thread_id, s_t):
+def runprocess(thread_id, s_t, ref_image):
 	global T
 	global model
-	global LOOK_SPEED
+	global critic
+	global discriminator
 	# global max_score
 
 	t = 0
@@ -351,10 +370,14 @@ def runprocess(thread_id, s_t):
 	r_t = 0
 	r_store = np.empty((0, 1), dtype=np.float32)
 	state_store = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
+	refs_store = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
 	action_store = np.empty((0, NUM_ACTIONS), dtype=np.float32)
+	time_store = np.zeros((0, 1))
 	pred_store = np.empty((0, NUM_ACTIONS * 2), dtype=np.float32)
 	critic_store = np.empty((0, 1), dtype=np.float32)
+
 	s_t = s_t.reshape(1, s_t.shape[0], s_t.shape[1], s_t.shape[2])
+	ref_image = ref_image.reshape(1, ref_image.shape[0], ref_image.shape[1], ref_image.shape[2])
 
 	while t-t_start < T_MAX and terminal == False:
 		t += 1
@@ -362,8 +385,15 @@ def runprocess(thread_id, s_t):
 		# LOOK_SPEED += TEMP_INCR
 		# LOOK_SPEED = np.clip(LOOK_SPEED, 0, 0.1)
 
+		ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0)
+		time = game_state[thread_id].frame_count
+		time_sig = TIME_SIG_GAIN * np.array(time / (HORIZON - 1) - 0.5).reshape(1, 1)
+		# time_sig = np.array(time).reshape(1, 1)
+
 		with graph.as_default():
-			actions = model.predict([s_t, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])[0]
+			critic_reward = critic.predict([s_t, time_sig])
+			pi = PI.predict([s_t, ref_image, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])
+			actions = model.predict([s_t, ref_image, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])[0]
 
 		# mu = out[:NUM_ACTIONS]
 		# sigma_sq = out[NUM_ACTIONS:]
@@ -375,15 +405,18 @@ def runprocess(thread_id, s_t):
 
 		x_t = preprocess(x_t)
 
-		disc_out = discriminator.predict(x_t)[0][0]
-		r_t = R_SCALE * disc_out
-		# r_t = R_SCALE * (disc_out - prev_disc[thread_id])
-		# prev_disc[thread_id] = disc_out
+		d_g = discriminator.predict(x_t)[0][0]
+		# d_r = discriminator.predict(ref_image)[0][0]
+		r_t = R_SCALE * d_g
+		# r_t = R_SCALE * (d_g - prev_disc[thread_id])
+		# prev_disc[thread_id] = d_g
 
-		alpha = np.clip(game_state[thread_id].frame_count / (100 * IMAGE_ROWS * IMAGE_COLS), 0, 1)
-		p_term = 1 - (np.clip(r_t * 10, -1, 1) + 1) / 2
-		p_term = alpha * p_term
-		terminal = np.random.choice([True, False], 1, p=[p_term, 1 - p_term])[0]
+		# alpha = np.clip(time_sig / (2 * T_MAX), 0, 1)
+		# p_term = 1 - np.clip((r_t + 1) / 2, 0.01, 0.99)
+		# p_term = alpha * p_term
+		# terminal = np.random.choice([True, False], 1, p=[p_term, 1 - p_term])[0]
+		if (time + 1) >= HORIZON:
+			terminal = True
 
 		if terminal:
 			game_state[thread_id].reset()
@@ -391,17 +424,15 @@ def runprocess(thread_id, s_t):
 			x_t = preprocess(x_t)
 			prev_disc[thread_id] = discriminator.predict(x_t)[0][0]
 
-		with graph.as_default():
-			critic_reward = critic.predict(s_t)
-			pi = PI.predict([s_t, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])
-
 		actions = np.reshape(actions, (1, -1))
 		pi = np.reshape(pi, (1, -1))
 		critic_reward = np.reshape(critic_reward, (1, -1))
 
 		r_store = np.append(r_store, [[r_t] * 1], axis = 0)
 		state_store = np.append(state_store, s_t, axis = 0)
+		refs_store = np.append(refs_store, ref_image, axis = 0)
 		action_store = np.append(action_store, actions, axis=0)
+		time_store = np.append(time_store, time_sig, axis = 0)
 		pred_store = np.append(pred_store, pi, axis = 0)
 		critic_store = np.append(critic_store, critic_reward, axis=0)
 		
@@ -411,12 +442,12 @@ def runprocess(thread_id, s_t):
 	if terminal == False:
 		r_store[len(r_store)-1] = critic_store[len(r_store)-1]
 	else:
-		r_store[len(r_store)-1] = min(r_t, -1)
+		ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0)
 	
 	for i in range(2,len(r_store)+1):
 		r_store[len(r_store)-i] = r_store[len(r_store)-i] + GAMMA*r_store[len(r_store)-i + 1]
 
-	return s_t, state_store, action_store, pred_store, r_store, critic_store
+	return s_t, ref_image, state_store, refs_store, action_store, time_store, pred_store, r_store, critic_store
 
 #function to decrease the learning rate after every epoch. In this manner, the learning rate reaches 0, by 20,000 epochs
 def create_lr_fn(lr):
@@ -428,10 +459,11 @@ def create_lr_fn(lr):
 	return step_decay
 
 class actorthread(threading.Thread):
-	def __init__(self,thread_id, s_t):
+	def __init__(self,thread_id, s_t, ref_image):
 		threading.Thread.__init__(self)
 		self.thread_id = thread_id
 		self.next_state = s_t
+		self.ref_image = ref_image
 
 	def run(self):
 		global episode_action
@@ -439,20 +471,25 @@ class actorthread(threading.Thread):
 		global episode_r
 		global episode_critic
 		global episode_state
+		global episode_time
+		global episode_refs
 
 		threadLock.acquire()
-		self.next_state, state_store, action_store, pred_store, r_store, critic_store = runprocess(self.thread_id, self.next_state)
+		self.next_state, self.ref_image, state_store, refs_store, action_store, time_store, pred_store, r_store, critic_store = runprocess(self.thread_id, self.next_state, self.ref_image)
 		self.next_state = self.next_state.reshape(self.next_state.shape[1], self.next_state.shape[2], self.next_state.shape[3])
 
 		episode_r = np.append(episode_r, r_store, axis = 0)
 		episode_pred = np.append(episode_pred, pred_store, axis = 0)
 		episode_action = np.append(episode_action, action_store, axis = 0)
+		episode_time = np.append(episode_time, time_store, axis = 0)
 		episode_state = np.append(episode_state, state_store, axis = 0)
+		episode_refs = np.append(episode_refs, refs_store, axis = 0)
 		episode_critic = np.append(episode_critic, critic_store, axis = 0)
 
 		threadLock.release()
 
 states = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
+ref_images = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
 
 #initializing state of each thread
 for i in range(0, len(game_state)):
@@ -460,14 +497,17 @@ for i in range(0, len(game_state)):
 	image = preprocess(image)
 	state = np.concatenate([image] * TIME_SLICES, axis=3)
 	states = np.append(states, state, axis = 0)
+	ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0)
+	ref_images = np.append(ref_images, ref_image, axis = 0)
 
 while True:	
 	threadLock = threading.Lock()
 	threads = []
 	for i in range(0,THREADS):
-		threads.append(actorthread(i, states[i]))
+		threads.append(actorthread(i, states[i], ref_images[i]))
 
 	states = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
+	ref_images = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
 
 	for i in range(0,THREADS):
 		threads[i].start()
@@ -480,6 +520,7 @@ while True:
 
 	for i in range(0,THREADS):
 		state = threads[i].next_state
+		ref_image = threads[i].ref_image
 		# plt.imshow(state[:, :, IMAGE_CHANNELS-NUM_CROPS])
 		# plt.show()
 		# plt.imshow(state[:, :, IMAGE_CHANNELS-NUM_CROPS+1])
@@ -488,6 +529,7 @@ while True:
 		# plt.show()
 		state = state.reshape(1, state.shape[0], state.shape[1], state.shape[2])
 		states = np.append(states, state, axis = 0)
+		ref_images = np.append(ref_images, ref_image, axis = 0)
 
 	e_mean = np.mean(episode_r)
 	#advantage calculation for each action taken
@@ -507,31 +549,40 @@ while True:
 	positive_y = np.ones((episode_state.shape[0], 1), dtype=np.float32)
 	negative_y = -positive_y
 	dummy_y = np.zeros((episode_state.shape[0], 1), dtype=np.float32)
-	
-	disc_hist = D_train.fit([real_episode, episode_state], [positive_y, negative_y, dummy_y], callbacks = callbacks_disc, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
-	critic_hist = critic.fit(episode_state, episode_r, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
-	history = model.fit([episode_state, advantage, episode_pred], episode_action, callbacks = callbacks_rl, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+	if T < FRAMES_TO_PRETRAIN_DISC:
+		disc_hist = D_train.fit([real_episode, episode_state], [positive_y, negative_y, dummy_y], callbacks = callbacks_disc, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+	else:
+		disc_eval = D_train.evaluate([real_episode, episode_state], [positive_y, negative_y, dummy_y], batch_size = episode_state.shape[0])
+		critic_hist = critic.fit([episode_state, episode_time], episode_r, epochs = EPISODE + EPOCHS // 2, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+		history = model.fit([episode_state, episode_refs, advantage, episode_pred], episode_action, callbacks = callbacks_rl, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
 
 	episode_r = np.empty((0, 1), dtype=np.float32)
 	episode_pred = np.empty((0, NUM_ACTIONS * 2), dtype=np.float32)
 	episode_action = np.empty((0, NUM_ACTIONS), dtype=np.float32)
+	episode_time = np.zeros((0, 1))
 	episode_state = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
+	episode_refs = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
 	episode_critic = np.empty((0, 1), dtype=np.float32)
 
-	summary = tf.Summary(value=[
-		tf.Summary.Value(tag="reward mean", simple_value=float(e_mean)),
-		tf.Summary.Value(tag="action loss", simple_value=float(history.history['loss'][-1])),
-		tf.Summary.Value(tag="critic loss", simple_value=float(critic_hist.history['loss'][-1])),
-		tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_hist.history['loss'][-1])),
-		tf.Summary.Value(tag="real loss", simple_value=float(disc_hist.history['real_out_loss'][-1])),
-		tf.Summary.Value(tag="fake loss", simple_value=float(disc_hist.history['fake_out_loss'][-1])),
-		tf.Summary.Value(tag="gradient penalty loss", simple_value=float(disc_hist.history['interp_out_loss'][-1])),
-		# tf.Summary.Value(tag="max score", simple_value=float(max_score))
-	])
-	summary_writer.add_summary(summary, EPISODE)
+	if T >= FRAMES_TO_PRETRAIN_DISC:
+		summary = tf.Summary(value=[
+			tf.Summary.Value(tag="reward mean", simple_value=float(e_mean)),
+			tf.Summary.Value(tag="action loss", simple_value=float(history.history['loss'][-1])),
+			tf.Summary.Value(tag="critic loss", simple_value=float(critic_hist.history['loss'][-1])),
+			tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_eval[0])),
+			tf.Summary.Value(tag="real loss", simple_value=float(disc_eval[1])),
+			tf.Summary.Value(tag="fake loss", simple_value=float(disc_eval[2])),
+			tf.Summary.Value(tag="gradient penalty loss", simple_value=float(disc_eval[3])),
+			# tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_hist.history['loss'][-1])),
+			# tf.Summary.Value(tag="real loss", simple_value=float(disc_hist.history['real_out_loss'][-1])),
+			# tf.Summary.Value(tag="fake loss", simple_value=float(disc_hist.history['fake_out_loss'][-1])),
+			# tf.Summary.Value(tag="gradient penalty loss", simple_value=float(disc_hist.history['interp_out_loss'][-1])),
+			# tf.Summary.Value(tag="max score", simple_value=float(max_score))
+		])
+		summary_writer.add_summary(summary, EPISODE)
 
-	if EPISODE % (20 * EPOCHS) == 0: 
-		model.save("saved_models/model_updates" +	str(EPISODE)) 
-		discriminator.save("saved_models/discrimiator_updates" + str(EPISODE))
-		critic.save("saved_models/critic_updates", str(EPISODE))
-	EPISODE += EPOCHS
+		if EPISODE % (20 * EPOCHS) == 0: 
+			model.save("saved_models/model_updates" +	str(EPISODE)) 
+			discriminator.save("saved_models/discrimiator_updates" + str(EPISODE))
+			critic.save("saved_models/critic_updates", str(EPISODE))
+		EPISODE += EPOCHS
