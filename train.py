@@ -42,13 +42,13 @@ GAMMA = 0.95                # discount value
 LAMBDA = 0.95               # bias variance trade off (high Lambda = high variance, low bias)
 BETA = 0.01                 # regularisation coefficient
 VAR_SCALE = 1
-R_SCALE = 0.1
+R_SCALE = 1
 GP_LAMBDA = 1
-IMAGE_ROWS = 32
-IMAGE_COLS = 32
+IMAGE_ROWS = 28
+IMAGE_COLS = 28
 TIME_SLICES = 2
-NUM_ACTIONS = 8
-IMAGE_CHANNELS = 3
+NUM_ACTIONS = 5
+IMAGE_CHANNELS = 1
 LEARNING_RATE_RL = 2e-4
 LEARNING_RATE_CRITC = 7e-4
 LOSS_CLIPPING = 0.2
@@ -66,8 +66,9 @@ BATCH_SIZE = 32
 T = 0
 EPISODE = 0
 HORIZON = 512
+MSE_TERM_THRESHOLD = 0.5
 
-(real, _), (_, _) = cifar10.load_data()
+(real, _), (_, _) = mnist.load_data()
 real = real.reshape(-1, IMAGE_COLS, IMAGE_ROWS, IMAGE_CHANNELS)
 if IMAGE_CHANNELS < 3:
 	real = np.mean(real, axis=-1, keepdims=True)
@@ -473,6 +474,11 @@ def runprocess(thread_id, s_t, ref_image):
 	s_t = s_t.reshape(1, s_t.shape[0], s_t.shape[1], s_t.shape[2])
 	ref_image = np.expand_dims(ref_image, 0)
 
+	start_img = np.array([[[game.BACKGROUND_COLOR]]])
+	if start_img.shape[-1] > IMAGE_CHANNELS:
+		start_img = np.mean(start_img, axis=-1, keepdims=True)
+	mse_0 = np.mean(np.square(ref_image - start_img))
+
 	while t-t_start < T_MAX and terminal == False:
 		t += 1
 		T += 1
@@ -491,7 +497,7 @@ def runprocess(thread_id, s_t, ref_image):
 		mse_t = np.mean(np.square(ref_image - s_t[:,:,:, 0:ref_image.shape[3]]))
 		mse_t_1 = np.mean(np.square(ref_image - x_t))
 		# r_t = 1 / (1 + mse_t_1)
-		r_t = mse_t - mse_t_1
+		r_t = R_SCALE * (mse_t - mse_t_1) / mse_0
 		# r_t_0 = 1 / (1 + mse_t  )
 		# r_t_1 = 1 / (1 + mse_t_1)
 		# r_t = r_t_1 - r_t_0
@@ -509,8 +515,8 @@ def runprocess(thread_id, s_t, ref_image):
 		#	terminal = True
 
 		# Early termination condition reached when resulting image is worse than an average image or agent did nothing
-		# mse_ref_to_avg = np.mean(np.square(ref_image - np.mean(ref_image, axis = (0, 1, 2)))) # Distance of reference image to its average
-		if ((time + 1) == HORIZON) or np.all(x_t == s_t):
+		# mse_ref_to_black = np.mean(np.square(ref_image - black_img))
+		if ((time + 1) == HORIZON) or np.all(x_t == s_t) or (mse_t_1 > MSE_TERM_THRESHOLD):
 			terminal = True
 
 		if terminal:
@@ -635,6 +641,11 @@ while True:
 
 	# Only update once we have enough samples in memory
 	if episode_state.shape[0] >= T_MAX * THREADS:
+		# Normalized returns
+		ret_mean = np.mean(episode_r)
+		ret_std = np.std(episode_r)
+		episode_r = (episode_r - ret_mean) / ret_std
+
 		e_mean = np.mean(episode_r)
 		e_mse = np.mean(np.square(episode_state[:,:,:,0:episode_refs.shape[3]] - episode_refs))
 		#advantage calculation for each action taken
