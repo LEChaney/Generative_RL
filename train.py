@@ -59,7 +59,7 @@ LEARNING_RATE_DISC = 5e-5
 # TEMPERATURE = 0
 # TEMP_INCR = 1e-6
 
-EPOCHS = 1
+EPOCHS = 3
 THREADS = 16
 T_MAX = 16
 BATCH_SIZE = 32
@@ -413,10 +413,10 @@ def runprocess(thread_id, s_t, ref_image):
 
 		x_t = preprocess(x_t)
 
-		# mse_t = np.mean(np.square(ref_image - s_t))
+		mse_t = np.mean(np.square(ref_image - s_t))
 		mse_t_1 = np.mean(np.square(ref_image - x_t))
-		r_t = 1 / (1 + mse_t_1)
-		# r_t = mse_t - mse_t_1
+		# r_t = 1 / (1 + mse_t_1)
+		r_t = mse_t - mse_t_1
 		# r_t_0 = 1 / (1 + mse_t  )
 		# r_t_1 = 1 / (1 + mse_t_1)
 		# r_t = r_t_1 - r_t_0
@@ -434,8 +434,8 @@ def runprocess(thread_id, s_t, ref_image):
 		#	terminal = True
 
 		# Early termination condition reached when resulting image is worse than an average image or agent did nothing
-		mse_ref_to_avg = np.mean(np.square(ref_image - 0)) # Distance of reference image to zero mean average image
-		if (mse_t_1 >= mse_ref_to_avg) or np.all(x_t == s_t) or ((time + 1) == HORIZON):
+		# mse_ref_to_avg = np.mean(np.square(ref_image - np.mean(ref_image, axis = (0, 1, 2)))) # Distance of reference image to its average
+		if ((time + 1) == HORIZON): # or (mse_t_1 >= mse_ref_to_avg) or np.all(x_t == s_t)
 			terminal = True
 
 		if terminal:
