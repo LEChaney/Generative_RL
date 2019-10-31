@@ -15,7 +15,7 @@ from keras.layers import Conv2D, ReLU, BatchNormalization, LeakyReLU
 from keras_contrib.layers.normalization.instancenormalization import InstanceNormalization
 from keras.engine.topology import Layer
 from keras.layers.merge import _Merge
-from keras.optimizers import RMSprop, Adam
+from keras.optimizers import RMSprop, Adam, SGD
 import keras.backend as K
 from keras.backend.tensorflow_backend import set_session
 from keras.callbacks import LearningRateScheduler, History
@@ -38,43 +38,49 @@ import math
 
 import matplotlib.pyplot as plt
 
-GAMMA = 0.99                #discount value
-BETA = 0.01                 #regularisation coefficient
+GAMMA = 0.95                # discount value
+LAMBDA = 0.95               # bias variance trade off (high Lambda = high variance, low bias)
+BETA = 0.01                 # regularisation coefficient
 VAR_SCALE = 1
-# R_SCALE = 0.01
-LAMBDA = 1
+R_SCALE = 0.1
+GP_LAMBDA = 1
 IMAGE_ROWS = 32
 IMAGE_COLS = 32
-TIME_SLICES = 1
-NUM_ACTIONS = 8
-IMAGE_CHANNELS = TIME_SLICES * 3
+TIME_SLICES = 2
+NUM_ACTIONS = 6
+IMAGE_CHANNELS = 1
 LEARNING_RATE_RL = 2e-4
-LEARNING_RATE_DISC = 2e-4
-LEARNING_RATE_CRITC = 2e-4
+LEARNING_RATE_CRITC = 7e-4
 LOSS_CLIPPING = 0.2
 FRAMES_TO_PRETRAIN_DISC = 0
 TIME_SIG_GAIN = 75
 INPUT_GAIN = 1
+LEARNING_RATE_DISC = 5e-5
 # TEMPERATURE = 0
 # TEMP_INCR = 1e-6
 
-EPOCHS = 3
+EPOCHS = 1
 THREADS = 16
-T_MAX = 15
-BATCH_SIZE = 80
+T_MAX = 16
+BATCH_SIZE = 32
 T = 0
 EPISODE = 0
-HORIZON = T_MAX * 100
+HORIZON = 512
 
 (real, _), (_, _) = cifar10.load_data()
 real = real.reshape(-1, IMAGE_COLS, IMAGE_ROWS, IMAGE_CHANNELS)
+if IMAGE_CHANNELS < 3:
+	real = np.mean(real, axis=-1, keepdims=True)
 img_mean = np.mean(real, axis=(0, 1, 2))
 img_std = np.std(real, axis=(0, 1, 2))
 real = (real - img_mean) / img_std
+white_img = (np.array([[[[255] * IMAGE_CHANNELS]]]) - img_mean) / img_std
+black_img = (np.array([[[[0] * IMAGE_CHANNELS]]]) - img_mean) / img_std
+max_mse = np.mean(np.square(white_img - black_img))
 
 episode_r = np.empty((0, 1), dtype=np.float32)
 episode_time = np.zeros((0, 1))
-episode_state = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
+episode_state = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS * TIME_SLICES))
 episode_refs = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
 episode_action = np.empty((0, NUM_ACTIONS), dtype=np.float32)
 episode_pred = np.empty((0, NUM_ACTIONS * 2), dtype=np.float32)
@@ -149,7 +155,7 @@ def gp_loss(interp_x):
 		gradients_sqr = K.square(gradients)
 		gradients_sqr_sum = K.sum(gradients_sqr, axis = np.arange(1, len(gradients_sqr.shape)))
 		gradient_l2_norm = K.sqrt(gradients_sqr_sum)
-		gradient_penalty = LAMBDA * K.square(gradient_l2_norm)
+		gradient_penalty = GP_LAMBDA * K.square(gradient_l2_norm)
 		gradient_penalty = K.mean(gradient_penalty)
 
 		return gradient_penalty
@@ -210,7 +216,7 @@ class AddNoise(Layer):
 
 #function buildmodel() to define the structure of the neural network in use 
 def buildmodel():
-	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Input')
+	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS * TIME_SLICES, ), name = 'Input')
 	Ref = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Ref_Image')
 
 	In = Concatenate()([S, Ref])
@@ -252,12 +258,13 @@ def buildmodel():
 	PI_old = Input(shape = (NUM_ACTIONS * 2,), name = 'Old_Prediction')
 	model = Model(inputs = [S,Ref,A,PI_old], outputs = Act)
 	# optimizer = RMSprop(lr = LEARNING_RATE, rho = 0.99, epsilon = 0.1)
-	optimizer = Adam(lr = LEARNING_RATE_RL)
+	# optimizer = Adam(lr = LEARNING_RATE_RL)
+	optimizer = SGD(LEARNING_RATE_RL, momentum = 0.9)
 	model.compile(loss = ppo_loss(A, PI, PI_old), optimizer = optimizer)
 	return model
 
 def build_critic():
-	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Input')
+	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS * TIME_SLICES, ), name = 'Input')
 	Ref = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Ref_Image')
 	T = Input(shape = (1,), name = 'Time_Signal')
 	
@@ -278,7 +285,7 @@ def build_critic():
 	h2 = LeakyReLU(alpha=0.2)(h2)
 	h2 = Flatten()(h2)
 
-	h2 = Concatenate()([h2, T])
+	# h2 = Concatenate()([h2, T])
 
 	h3 = Dense(512, kernel_initializer = 'he_uniform') (h2)
 	h3 = LeakyReLU(alpha=0.2)(h3)
@@ -286,7 +293,8 @@ def build_critic():
 	C = Dense(1, activation = 'linear')(h3)
 
 	model = Model(inputs = [S, Ref, T], outputs = C)
-	optimizer = Adam(lr = LEARNING_RATE_CRITC)
+	# optimizer = Adam(lr = LEARNING_RATE_CRITC)
+	optimizer = SGD(LEARNING_RATE_CRITC, momentum = 0.9)
 	model.compile(loss = 'mse', optimizer = optimizer)
 	return model
 
@@ -352,13 +360,12 @@ def sigmoid(X):
 model = buildmodel()
 critic = build_critic()
 discriminator, D_train = build_discriminator()
+PI = Model(inputs=model.input, outputs=model.get_layer('PI').output)
 # model.load_weights("saved_models/model_updates10000")
 model._make_predict_function()
 critic._make_predict_function()
 discriminator._make_predict_function()
-graph = tf.get_default_graph()
-
-PI = Model(inputs=model.input, outputs=model.get_layer('PI').output)
+PI._make_predict_function()
 
 game_state = []
 prev_disc = []
@@ -381,7 +388,7 @@ def runprocess(thread_id, s_t, ref_image):
 	terminal = False
 	r_t = 0
 	r_store = np.empty((0, 1), dtype=np.float32)
-	state_store = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
+	state_store = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS * TIME_SLICES))
 	refs_store = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
 	action_store = np.empty((0, NUM_ACTIONS), dtype=np.float32)
 	time_store = np.zeros((0, 1))
@@ -398,29 +405,38 @@ def runprocess(thread_id, s_t, ref_image):
 		time = game_state[thread_id].frame_count
 		time_sig = TIME_SIG_GAIN * np.array(time / (HORIZON - 1) - 0.5).reshape(1, 1)
 
-		with graph.as_default():
-			critic_reward = critic.predict([s_t, ref_image, time_sig])
-			pi = PI.predict([s_t, ref_image, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])
-			actions = model.predict([s_t, ref_image, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])[0]
+		critic_reward = critic.predict([s_t, ref_image, time_sig])
+		pi = PI.predict([s_t, ref_image, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])
+		actions = model.predict([s_t, ref_image, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])[0]
 
 		x_t = game_state[thread_id].frame_step(actions)
 
 		x_t = preprocess(x_t)
 
-		mse = np.mean(np.square(x_t - ref_image))
-		r_t = -mse
+		# mse_t = np.mean(np.square(ref_image - s_t))
+		mse_t_1 = np.mean(np.square(ref_image - x_t))
+		r_t = 1 / (1 + mse_t_1)
+		# r_t = mse_t - mse_t_1
+		# r_t_0 = 1 / (1 + mse_t  )
+		# r_t_1 = 1 / (1 + mse_t_1)
+		# r_t = r_t_1 - r_t_0
 		# d_g = discriminator.predict(x_t)[0][0]
 		# d_r = discriminator.predict(ref_image)[0][0]
 		# r_t = R_SCALE * d_g
 		# r_t = R_SCALE * (d_g - prev_disc[thread_id])
 		# prev_disc[thread_id] = d_g
 
-		alpha = np.clip(time / (HORIZON), 0, 1)
-		p_term = np.clip(-r_t * 0.2, 1 / HORIZON, 1 - 1 / HORIZON)
-		p_term = alpha * p_term
-		terminal = np.random.choice([True, False], 1, p=[p_term, 1 - p_term])[0]
-		# if (time + 1) >= HORIZON:
-		# 	terminal = True
+		# alpha = np.clip(1 / (HORIZON), 0, 1)
+		# p_term = 1 #np.clip(-r_t, 1 / HORIZON, 1 - 1 / HORIZON)
+		# p_term = alpha * p_term
+		# terminal = np.random.choice([True, False], 1, p=[p_term, 1 - p_term])[0]
+		#if (time + 1) >= HORIZON:
+		#	terminal = True
+
+		# Early termination condition reached when resulting image is worse than an average image or agent did nothing
+		mse_ref_to_avg = np.mean(np.square(ref_image - 0)) # Distance of reference image to zero mean average image
+		if (mse_t_1 >= mse_ref_to_avg) or np.all(x_t == s_t) or ((time + 1) == HORIZON):
+			terminal = True
 
 		if terminal:
 			game_state[thread_id].reset()
@@ -440,16 +456,23 @@ def runprocess(thread_id, s_t, ref_image):
 		pred_store = np.append(pred_store, pi, axis = 0)
 		critic_store = np.append(critic_store, critic_reward, axis=0)
 		
-		s_t = x_t
+		s_t = np.append(x_t, s_t[:,:,:, :-IMAGE_CHANNELS], axis = -1)
 		print("Frame = " + str(T) + ", Updates = " + str(EPISODE) + ", Thread = " + str(thread_id) + ", Action = " + str(actions) + ", Output = "+ str(pi))
 	
-	if terminal == False:
-		r_store[len(r_store)-1] = critic_store[len(r_store)-1]
+	episode_end_t = len(r_store)-1
+	if not terminal:
+		time_t_1 = time + 1
+		time_sig_t_1 = TIME_SIG_GAIN * np.array(time_t_1 / (HORIZON - 1) - 0.5).reshape(1, 1)
+		v_t_1 = critic.predict([s_t, ref_image, time_sig_t_1])
+		r_store[episode_end_t] = r_t + GAMMA * v_t_1
 	else:
+		r_store[episode_end_t] = r_t # R_t_(1) = r_t + gamma * (V(s_t_1) = 0) when next state (s_t_1) is terminal
 		ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0)
 	
+	# Generalized advantage estimation (Calculating returns R_t for all t in episode, where A_t = R_t - V_t)
 	for i in range(2,len(r_store)+1):
-		r_store[len(r_store)-i] = r_store[len(r_store)-i] + GAMMA*r_store[len(r_store)-i + 1]
+		_t = len(r_store) - i
+		r_store[_t] = r_store[_t] + LAMBDA * GAMMA * r_store[_t + 1] + (1-LAMBDA) * GAMMA * critic_store[_t + 1]
 
 	return s_t, ref_image, state_store, refs_store, action_store, time_store, pred_store, r_store, critic_store
 
@@ -492,7 +515,7 @@ class actorthread(threading.Thread):
 
 		threadLock.release()
 
-states = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
+states = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS * TIME_SLICES))
 ref_images = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
 
 #initializing state of each thread
@@ -510,7 +533,7 @@ while True:
 	for i in range(0,THREADS):
 		threads.append(actorthread(i, states[i], ref_images[i]))
 
-	states = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
+	states = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS * TIME_SLICES))
 	ref_images = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
 
 	for i in range(0,THREADS):
@@ -535,59 +558,65 @@ while True:
 		states = np.append(states, state, axis = 0)
 		ref_images = np.append(ref_images, ref_image, axis = 0)
 
-	e_mean = np.mean(episode_r)
-	#advantage calculation for each action taken
-	advantage = episode_r - episode_critic
-	# advantage = np.reshape(advantage, (-1, 1))
-	print("backpropagating")
+	# Only update once we have enough samples in memory
+	if episode_state.shape[0] >= T_MAX * THREADS:
+		e_mean = np.mean(episode_r)
+		e_mse = np.mean(np.square(episode_state - episode_refs))
+		#advantage calculation for each action taken
+		advantage = episode_r - episode_critic
+		# adv_mean = np.mean(advantage)
+		# adv_std = np.std(advantage)
+		# advantage = (advantage - adv_mean) / (adv_std + 1e-10)
+		print("backpropagating")
 
-	lr_fn_rl = create_lr_fn(LEARNING_RATE_RL)
-	lr_fn_disc = create_lr_fn(LEARNING_RATE_DISC)
-	lrate_rl = LearningRateScheduler(lr_fn_rl)
-	lrate_disc = LearningRateScheduler(lr_fn_disc)
-	callbacks_rl = []
-	callbacks_disc = []
+		lr_fn_rl = create_lr_fn(LEARNING_RATE_RL)
+		lr_fn_disc = create_lr_fn(LEARNING_RATE_DISC)
+		lrate_rl = LearningRateScheduler(lr_fn_rl)
+		lrate_disc = LearningRateScheduler(lr_fn_disc)
+		callbacks_rl = []
+		callbacks_disc = []
 
-	#backpropagation
-	real_episode = real[np.random.randint(low = 0, high = real.shape[0], size = episode_state.shape[0])]
-	positive_y = np.ones((episode_state.shape[0], 1), dtype=np.float32)
-	negative_y = -positive_y
-	dummy_y = np.zeros((episode_state.shape[0], 1), dtype=np.float32)
-	# if T < FRAMES_TO_PRETRAIN_DISC:
-	# 	disc_hist = D_train.fit([real_episode, episode_state], [positive_y, negative_y, dummy_y], callbacks = callbacks_disc, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
-	# else:
-		# disc_eval = D_train.evaluate([real_episode, episode_state], [positive_y, negative_y, dummy_y], batch_size = episode_state.shape[0])
-		# disc_hist = D_train.fit([real_episode, episode_state], [positive_y, negative_y, dummy_y], callbacks = callbacks_disc, epochs = EPISODE + EPOCHS * 3, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
-	critic_hist = critic.fit([episode_state, episode_refs, episode_time], episode_r, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
-	history = model.fit([episode_state, episode_refs, advantage, episode_pred], episode_action, callbacks = callbacks_rl, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+		#backpropagation
+		# real_episode = real[np.random.randint(low = 0, high = real.shape[0], size = episode_state.shape[0])]
+		# positive_y = np.ones((episode_state.shape[0], 1), dtype=np.float32)
+		# negative_y = -positive_y
+		# dummy_y = np.zeros((episode_state.shape[0], 1), dtype=np.float32)
+		# if T < FRAMES_TO_PRETRAIN_DISC:
+		# 	disc_hist = D_train.fit([real_episode, episode_state], [positive_y, negative_y, dummy_y], callbacks = callbacks_disc, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+		# else:
+			# disc_eval = D_train.evaluate([real_episode, episode_state], [positive_y, negative_y, dummy_y], batch_size = episode_state.shape[0])
+			# disc_hist = D_train.fit([real_episode, episode_state], [positive_y, negative_y, dummy_y], callbacks = callbacks_disc, epochs = EPISODE + EPOCHS * 3, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+		critic_hist = critic.fit([episode_state, episode_refs, episode_time], episode_r, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+		history = model.fit([episode_state, episode_refs, advantage, episode_pred], episode_action, callbacks = callbacks_rl, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
 
-	episode_r = np.empty((0, 1), dtype=np.float32)
-	episode_pred = np.empty((0, NUM_ACTIONS * 2), dtype=np.float32)
-	episode_action = np.empty((0, NUM_ACTIONS), dtype=np.float32)
-	episode_time = np.zeros((0, 1))
-	episode_state = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
-	episode_refs = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
-	episode_critic = np.empty((0, 1), dtype=np.float32)
+		episode_r = np.empty((0, 1), dtype=np.float32)
+		episode_pred = np.empty((0, NUM_ACTIONS * 2), dtype=np.float32)
+		episode_action = np.empty((0, NUM_ACTIONS), dtype=np.float32)
+		episode_time = np.zeros((0, 1))
+		episode_state = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS * TIME_SLICES))
+		episode_refs = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
+		episode_critic = np.empty((0, 1), dtype=np.float32)
 
-	if T >= FRAMES_TO_PRETRAIN_DISC:
-		summary = tf.Summary(value=[
-			tf.Summary.Value(tag="reward mean", simple_value=float(e_mean)),
-			tf.Summary.Value(tag="action loss", simple_value=float(history.history['loss'][-1])),
-			tf.Summary.Value(tag="critic loss", simple_value=float(critic_hist.history['loss'][-1])),
-			# tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_eval[0])),
-			# tf.Summary.Value(tag="real loss", simple_value=float(disc_eval[1])),
-			# tf.Summary.Value(tag="fake loss", simple_value=float(disc_eval[2])),
-			# tf.Summary.Value(tag="gradient penalty loss", simple_value=float(disc_eval[3])),
-			# tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_hist.history['loss'][-1])),
-			# tf.Summary.Value(tag="real loss", simple_value=float(disc_hist.history['real_out_loss'][-1])),
-			# tf.Summary.Value(tag="fake loss", simple_value=float(disc_hist.history['fake_out_loss'][-1])),
-			# tf.Summary.Value(tag="gradient penalty loss", simple_value=float(disc_hist.history['interp_out_loss'][-1])),
-			# tf.Summary.Value(tag="max score", simple_value=float(max_score))
-		])
-		summary_writer.add_summary(summary, EPISODE)
+		if T >= FRAMES_TO_PRETRAIN_DISC:
+			summary = tf.Summary(value=[
+				tf.Summary.Value(tag="reward mean", simple_value=float(e_mean)),
+				tf.Summary.Value(tag="action loss", simple_value=float(history.history['loss'][-1])),
+				tf.Summary.Value(tag="critic loss", simple_value=float(critic_hist.history['loss'][-1])),
+				tf.Summary.Value(tag="mse", simple_value=float(e_mse)),
+				# tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_eval[0])),
+				# tf.Summary.Value(tag="real loss", simple_value=float(disc_eval[1])),
+				# tf.Summary.Value(tag="fake loss", simple_value=float(disc_eval[2])),
+				# tf.Summary.Value(tag="gradient penalty loss", simple_value=float(disc_eval[3])),
+				# tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_hist.history['loss'][-1])),
+				# tf.Summary.Value(tag="real loss", simple_value=float(disc_hist.history['real_out_loss'][-1])),
+				# tf.Summary.Value(tag="fake loss", simple_value=float(disc_hist.history['fake_out_loss'][-1])),
+				# tf.Summary.Value(tag="gradient penalty loss", simple_value=float(disc_hist.history['interp_out_loss'][-1])),
+				# tf.Summary.Value(tag="max score", simple_value=float(max_score))
+			])
+			summary_writer.add_summary(summary, T)
 
-		if EPISODE % (20 * EPOCHS) == 0: 
-			model.save("saved_models/model_updates" +	str(EPISODE)) 
-			discriminator.save("saved_models/discrimiator_updates" + str(EPISODE))
-			critic.save("saved_models/critic_updates", str(EPISODE))
-		EPISODE += EPOCHS
+			# if EPISODE % (50 * EPOCHS) == 0: 
+			# 	model.save("saved_models/model_updates" +	str(EPISODE)) 
+			# 	discriminator.save("saved_models/discrimiator_updates" + str(EPISODE))
+			# 	critic.save("saved_models/critic_updates", str(EPISODE))
+			EPISODE += EPOCHS
