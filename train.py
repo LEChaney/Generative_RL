@@ -10,8 +10,8 @@ from skimage import transform, color, exposure
 
 import keras
 from keras.models import Sequential, Model, load_model
-from keras.layers import Dense, Flatten, Activation, Input, Concatenate
-from keras.layers import Conv2D, ReLU, BatchNormalization, LeakyReLU
+from keras.layers import Dense, Flatten, Activation, Input, Concatenate, Reshape, Permute, Average, Add
+from keras.layers import Conv2D, ReLU, BatchNormalization, LeakyReLU, Softmax
 from keras_contrib.layers.normalization.instancenormalization import InstanceNormalization
 from keras.engine.topology import Layer
 from keras.layers.merge import _Merge
@@ -47,8 +47,8 @@ GP_LAMBDA = 1
 IMAGE_ROWS = 32
 IMAGE_COLS = 32
 TIME_SLICES = 2
-NUM_ACTIONS = 6
-IMAGE_CHANNELS = 1
+NUM_ACTIONS = 8
+IMAGE_CHANNELS = 3
 LEARNING_RATE_RL = 2e-4
 LEARNING_RATE_CRITC = 7e-4
 LOSS_CLIPPING = 0.2
@@ -214,6 +214,11 @@ class AddNoise(Layer):
 		noise = K.random_normal(K.concatenate([K.shape(x)[:-1], [1]]))
 		return x + noise * K.reshape(self.noise_scale, [1] * (K.ndim(x) - 1) + [-1])
 
+def dot(x):
+	a = x[0]
+	b = x[1]
+	return K.batch_dot(a, b)
+
 #function buildmodel() to define the structure of the neural network in use 
 def buildmodel():
 	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS * TIME_SLICES, ), name = 'Input')
@@ -223,29 +228,51 @@ def buildmodel():
 	In = Lambda(lambda x: x * INPUT_GAIN)(In)
 
 	from_color = CoordinateChannel2D()(In)
-	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(from_color)
+	from_color = Conv2D(128, kernel_size = (1,1), strides = (1,1), activation = 'linear')(from_color)
 
+	Q   = Reshape([-1, 128])(Conv2D(128, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(from_color))
+	Key = Reshape([-1, 128])(Conv2D(128, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(from_color))
+	Key = Permute([2, 1])(Key)
+	V   = Reshape([-1, 128])(Conv2D(128, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(from_color))
+	QK = Lambda(dot)([Q, Key])
+	a = Softmax()(QK)
+	atten = Reshape(from_color._keras_shape[1:])(Lambda(dot)([a, V]))
+	from_color = atten
+	
 	h0 = CoordinateChannel2D()(from_color)
-	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h0)
-	# h0 = AddNoise()(h0)
+	h0 = Conv2D(256, kernel_size = (3,3), strides = (2,2), padding = 'same', kernel_initializer = 'he_uniform')(h0)
 	h0 = LeakyReLU(alpha=0.2)(h0)
-	# h0 = BatchNormalization(axis=-1)(h0)
+
+	Q   = Reshape([-1, 256])(Conv2D(256, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(h0))
+	Key = Reshape([-1, 256])(Conv2D(256, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(h0))
+	Key = Permute([2, 1])(Key)
+	V   = Reshape([-1, 256])(Conv2D(256, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(h0))
+	QK = Lambda(dot)([Q, Key])
+	a = Softmax()(QK)
+	atten = Reshape(h0._keras_shape[1:])(Lambda(dot)([a, V]))
+	h0 = atten
+
 	h1 = CoordinateChannel2D()(h0)
-	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h1)
-	# h1 = AddNoise()(h1)
+	h1 = Conv2D(512, kernel_size = (3,3), strides = (2,2), padding = 'same', kernel_initializer = 'he_uniform')(h1)
 	h1 = LeakyReLU(alpha=0.2)(h1)
-	# h1 = BatchNormalization(axis=-1)(h1)
+
+	Q   = Reshape([-1, 512])(Conv2D(512, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(h1))
+	Key = Reshape([-1, 512])(Conv2D(512, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(h1))
+	Key = Permute([2, 1])(Key)
+	V   = Reshape([-1, 512])(Conv2D(512, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(h1))
+	QK = Lambda(dot)([Q, Key])
+	a = Softmax()(QK)
+	atten = Reshape(h1._keras_shape[1:])(Lambda(dot)([a, V]))
+	h1 = atten
+
 	h2 = CoordinateChannel2D()(h1)
-	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h2)
-	# h2 = AddNoise()(h2)
+	h2 = Conv2D(512, kernel_size = (3,3), strides = (2,2), padding = 'same', kernel_initializer = 'he_uniform')(h2)
 	h2 = LeakyReLU(alpha=0.2)(h2)
-	# h2 = BatchNormalization(axis=-1)(h2)
+
 	h2 = Flatten()(h2)
 
-	h3 = Dense(512, kernel_initializer = 'he_uniform')(h2)
-	# h3 = AddNoise()(h3)
+	h3 = Dense(512, kernel_initializer = 'he_uniform') (h2)
 	h3 = LeakyReLU(alpha=0.2)(h3)
-	# h3 = BatchNormalization(axis=-1)(h3)
 
 	PI_mu = Dense(NUM_ACTIONS, activation = 'tanh', kernel_initializer = 'glorot_uniform') (h3)
 	PI_var = Dense(NUM_ACTIONS, activation = 'sigmoid', kernel_initializer = 'glorot_uniform') (h3)
@@ -272,24 +299,52 @@ def build_critic():
 	In = Lambda(lambda x: x * INPUT_GAIN)(In)
 
 	from_color = CoordinateChannel2D()(In)
-	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(from_color)
+	from_color = Conv2D(128, kernel_size = (1,1), strides = (1,1), activation = 'linear')(from_color)
+
+	Q   = Reshape([-1, 128])(Conv2D(128, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(from_color))
+	Key = Reshape([-1, 128])(Conv2D(128, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(from_color))
+	Key = Permute([2, 1])(Key)
+	V   = Reshape([-1, 128])(Conv2D(128, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(from_color))
+	QK = Lambda(dot)([Q, Key])
+	a = Softmax()(QK)
+	atten = Reshape(from_color._keras_shape[1:])(Lambda(dot)([a, V]))
+	from_color = atten
 	
 	h0 = CoordinateChannel2D()(from_color)
-	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h0)
+	h0 = Conv2D(256, kernel_size = (3,3), strides = (2,2), padding = 'same', kernel_initializer = 'he_uniform')(h0)
 	h0 = LeakyReLU(alpha=0.2)(h0)
-	h1 = CoordinateChannel2D()(h0)
-	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h1)
-	h1 = LeakyReLU(alpha=0.2)(h1)
-	h2 = CoordinateChannel2D()(h1)
-	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h2)
-	h2 = LeakyReLU(alpha=0.2)(h2)
-	h2 = Flatten()(h2)
 
-	# h2 = Concatenate()([h2, T])
+	Q   = Reshape([-1, 256])(Conv2D(256, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(h0))
+	Key = Reshape([-1, 256])(Conv2D(256, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(h0))
+	Key = Permute([2, 1])(Key)
+	V   = Reshape([-1, 256])(Conv2D(256, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(h0))
+	QK = Lambda(dot)([Q, Key])
+	a = Softmax()(QK)
+	atten = Reshape(h0._keras_shape[1:])(Lambda(dot)([a, V]))
+	h0 = atten
+
+	h1 = CoordinateChannel2D()(h0)
+	h1 = Conv2D(512, kernel_size = (3,3), strides = (2,2), padding = 'same', kernel_initializer = 'he_uniform')(h1)
+	h1 = LeakyReLU(alpha=0.2)(h1)
+
+	Q   = Reshape([-1, 512])(Conv2D(512, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(h1))
+	Key = Reshape([-1, 512])(Conv2D(512, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(h1))
+	Key = Permute([2, 1])(Key)
+	V   = Reshape([-1, 512])(Conv2D(512, kernel_size = (1,1), strides = (1,1), padding = 'same', bias_initializer = 'he_uniform')(h1))
+	QK = Lambda(dot)([Q, Key])
+	a = Softmax()(QK)
+	atten = Reshape(h1._keras_shape[1:])(Lambda(dot)([a, V]))
+	h1 = atten
+
+	h2 = CoordinateChannel2D()(h1)
+	h2 = Conv2D(512, kernel_size = (3,3), strides = (2,2), padding = 'same', kernel_initializer = 'he_uniform')(h2)
+	h2 = LeakyReLU(alpha=0.2)(h2)
+
+	h2 = Flatten()(h2)
 
 	h3 = Dense(512, kernel_initializer = 'he_uniform') (h2)
 	h3 = LeakyReLU(alpha=0.2)(h3)
-
+	
 	C = Dense(1, activation = 'linear')(h3)
 
 	model = Model(inputs = [S, Ref, T], outputs = C)
@@ -305,17 +360,37 @@ def build_discriminator():
 	from_color = Conv2D(32, kernel_size = (1,1), strides = (1,1), activation = 'linear')(from_color)
 	
 	h0 = CoordinateChannel2D()(from_color)
-	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h0)
+	h0 = Conv2D(32, kernel_size = (3,3), strides = (1,1), padding = 'same', kernel_initializer = 'he_uniform')(h0)
 	h0 = LeakyReLU(alpha=0.2)(h0)
+	h0 = CoordinateChannel2D()(h0)
+	h0 = Conv2D(32, kernel_size = (3,3), strides = (2,2), padding = 'same', kernel_initializer = 'he_uniform')(h0)
+	h0 = LeakyReLU(alpha=0.2)(h0)
+	h0 = CoordinateChannel2D()(h0)
+	h0 = Conv2D(32, kernel_size = (3,3), strides = (1,1), padding = 'same', kernel_initializer = 'he_uniform')(h0)
+	h0 = LeakyReLU(alpha=0.2)(h0)
+
 	h1 = CoordinateChannel2D()(h0)
-	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h1)
+	h1 = Conv2D(64, kernel_size = (3,3), strides = (2,2), padding = 'same', kernel_initializer = 'he_uniform')(h1)
 	h1 = LeakyReLU(alpha=0.2)(h1)
+	h1 = CoordinateChannel2D()(h1)
+	h1 = Conv2D(64, kernel_size = (3,3), strides = (1,1), padding = 'same', kernel_initializer = 'he_uniform')(h1)
+	h1 = LeakyReLU(alpha=0.2)(h1)
+
 	h2 = CoordinateChannel2D()(h1)
-	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2), kernel_initializer = 'he_uniform')(h2)
+	h2 = Conv2D(128, kernel_size = (3,3), strides = (2,2), padding = 'same', kernel_initializer = 'he_uniform')(h2)
+	h2 = LeakyReLU(alpha=0.2)(h2)
+	h2 = CoordinateChannel2D()(h2)
+	h2 = Conv2D(128, kernel_size = (3,3), strides = (1,1), padding = 'same', kernel_initializer = 'he_uniform')(h2)
 	h2 = LeakyReLU(alpha=0.2)(h2)
 	h2 = Flatten()(h2)
 
 	h3 = Dense(512, kernel_initializer = 'he_uniform') (h2)
+	h3 = LeakyReLU(alpha=0.2)(h3)
+	h3 = Dense(512, kernel_initializer = 'he_uniform') (h3)
+	h3 = LeakyReLU(alpha=0.2)(h3)
+	h3 = Dense(512, kernel_initializer = 'he_uniform') (h3)
+	h3 = LeakyReLU(alpha=0.2)(h3)
+	h3 = Dense(512, kernel_initializer = 'he_uniform') (h3)
 	h3 = LeakyReLU(alpha=0.2)(h3)
 
 	out = Dense(1, activation = 'linear')(h3)
@@ -413,7 +488,7 @@ def runprocess(thread_id, s_t, ref_image):
 
 		x_t = preprocess(x_t)
 
-		mse_t = np.mean(np.square(ref_image - s_t))
+		mse_t = np.mean(np.square(ref_image - s_t[:,:,:, 0:ref_image.shape[3]]))
 		mse_t_1 = np.mean(np.square(ref_image - x_t))
 		# r_t = 1 / (1 + mse_t_1)
 		r_t = mse_t - mse_t_1
@@ -435,7 +510,7 @@ def runprocess(thread_id, s_t, ref_image):
 
 		# Early termination condition reached when resulting image is worse than an average image or agent did nothing
 		# mse_ref_to_avg = np.mean(np.square(ref_image - np.mean(ref_image, axis = (0, 1, 2)))) # Distance of reference image to its average
-		if ((time + 1) == HORIZON): # or (mse_t_1 >= mse_ref_to_avg) or np.all(x_t == s_t)
+		if ((time + 1) == HORIZON) or np.all(x_t == s_t):
 			terminal = True
 
 		if terminal:
@@ -561,7 +636,7 @@ while True:
 	# Only update once we have enough samples in memory
 	if episode_state.shape[0] >= T_MAX * THREADS:
 		e_mean = np.mean(episode_r)
-		e_mse = np.mean(np.square(episode_state - episode_refs))
+		e_mse = np.mean(np.square(episode_state[:,:,:,0:episode_refs.shape[3]] - episode_refs))
 		#advantage calculation for each action taken
 		advantage = episode_r - episode_critic
 		# adv_mean = np.mean(advantage)
