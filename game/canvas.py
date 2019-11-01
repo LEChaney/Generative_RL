@@ -63,9 +63,17 @@ class GameState:
         image_data = np.transpose(image_data, axes=[1, 0, 2])
         return image_data
 
-    def reset(self):
+    # New state expects an un-normalized numpy array (values ranging from 0 - 255)
+    # Will be reset using BACKGROUND_COLOR if no new state is specified
+    def reset(self, new_state = None):
+        if new_state is not None:
+            if new_state.shape[-1] < 3:
+                new_state = np.tile(new_state, [1, 1, 3])
+            self.surface = pygame.surfarray.make_surface(new_state)
+        else:
+            self.surface.fill(BACKGROUND_COLOR)
+
         self.frame_count = 0
-        self.surface.fill(BACKGROUND_COLOR)
         scaled = pygame.transform.scale(self.surface, [SCREEN_WIDTH, SCREEN_HEIGHT])
         SCREEN.blit(scaled, (0, 0))
         pygame.display.update()

@@ -447,10 +447,12 @@ PI._make_predict_function()
 
 game_state = []
 prev_disc = []
+best_state = []
 # max_score = 0
 for i in range(0,THREADS):
 	game_state.append(game.GameState(1000000))
 	current_frame = game_state[i].get_current_frame()
+	best_state.append({'frame': current_frame, 'mse': 1000}) # Set mse large so that any mse we first encounter will be better
 	current_frame = preprocess(current_frame)
 	prev_disc.append(discriminator.predict(current_frame)[0][0])
 
@@ -487,6 +489,12 @@ def runprocess(thread_id, s_t, ref_image):
 
 		time = game_state[thread_id].frame_count
 		time_sig = TIME_SIG_GAIN * np.array(time / (HORIZON - 1) - 0.5).reshape(1, 1)
+		mse_t = np.mean(np.square(ref_image - s_t[:,:,:, 0:ref_image.shape[3]]))
+
+		# Save best state so far
+		if (mse_t < best_state[thread_id]['mse']):
+			best_state[thread_id]['frame'] = s_t[0, ..., 0:IMAGE_CHANNELS] * img_std + img_mean
+			best_state[thread_id]['mse'] = mse_t
 
 		critic_reward = critic.predict([s_t, ref_image, time_sig])
 		pi = PI.predict([s_t, ref_image, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])
@@ -496,39 +504,15 @@ def runprocess(thread_id, s_t, ref_image):
 
 		x_t = preprocess(x_t)
 
-		mse_t = np.mean(np.square(ref_image - s_t[:,:,:, 0:ref_image.shape[3]]))
 		mse_t_1 = np.mean(np.square(ref_image - x_t))
-		# r_t = 1 / (1 + mse_t_1)
 		r_t = mse_t - mse_t_1
-		# r_t_0 = 1 / (1 + mse_t  )
-		# r_t_1 = 1 / (1 + mse_t_1)
-		# r_t = r_t_1 - r_t_0
-		# d_g = discriminator.predict(x_t)[0][0]
-		# d_r = discriminator.predict(ref_image)[0][0]
-		# r_t = R_SCALE * d_g
-		# r_t = R_SCALE * (d_g - prev_disc[thread_id])
-		# prev_disc[thread_id] = d_g
 
-		# alpha = np.clip(1 / (HORIZON), 0, 1)
-		# p_term = 1 #np.clip(-r_t, 1 / HORIZON, 1 - 1 / HORIZON)
-		# p_term = alpha * p_term
-		# terminal = np.random.choice([True, False], 1, p=[p_term, 1 - p_term])[0]
-		#if (time + 1) >= HORIZON:
-		#	terminal = True
-
-		# Early termination condition reached when resulting image is worse than an average image or agent did nothing
+		# Early termination conditions
 		# mse_ref_to_black = np.mean(np.square(ref_image - black_img))
 		if ((time + 1) == HORIZON) or np.all(x_t == s_t) or (mse_t_1 > MSE_TERM_THRESHOLD):
 			terminal = True
-
 		elif r_t < R_TERM_THRESHOLD:
 			terminal = True
-
-		if terminal:
-			game_state[thread_id].reset()
-			x_t = game_state[thread_id].get_current_frame()
-			x_t = preprocess(x_t)
-			prev_disc[thread_id] = discriminator.predict(x_t)[0][0]
 
 		actions = np.reshape(actions, (1, -1))
 		pi = np.reshape(pi, (1, -1))
@@ -541,8 +525,29 @@ def runprocess(thread_id, s_t, ref_image):
 		time_store = np.append(time_store, time_sig, axis = 0)
 		pred_store = np.append(pred_store, pi, axis = 0)
 		critic_store = np.append(critic_store, critic_reward, axis=0)
+
+		if terminal:
+			# On termination we have three options for reset
+			# 1 reset to blank canvas
+			# 2 reset to a random state in current memory
+			# 3 reset to the best previous state for this thread
+			choice = np.random.choice(['hard', 'memory', 'best'])
+			if choice == 'hard':
+				game_state[thread_id].reset()
+			elif choice == 'memory':
+				memory = np.append(episode_state, state_store, axis = 0)
+				random_state = memory[np.random.randint(0, memory.shape[0])]
+				random_state = random_state[..., 0:IMAGE_CHANNELS]
+				random_state = random_state * img_std + img_mean
+				game_state[thread_id].reset(random_state)
+			else:
+				game_state[thread_id].reset(best_state[thread_id]['frame'])
+				
+			x_t = game_state[thread_id].get_current_frame()
+			x_t = preprocess(x_t)
+			prev_disc[thread_id] = discriminator.predict(x_t)[0][0]
 		
-		s_t = np.append(x_t, s_t[:,:,:, :-IMAGE_CHANNELS], axis = -1)
+		s_t = np.append(x_t, s_t[..., :-IMAGE_CHANNELS], axis = -1)
 		print("Frame = " + str(T) + ", Updates = " + str(EPISODE) + ", Thread = " + str(thread_id) + ", Action = " + str(actions) + ", Output = "+ str(pi))
 	
 	episode_end_t = len(r_store)-1
