@@ -38,8 +38,8 @@ import math
 
 import matplotlib.pyplot as plt
 
-GAMMA = 0.95                # discount value
-LAMBDA = 0.95               # bias variance trade off (high Lambda = high variance, low bias)
+GAMMA = 0.99                # discount value
+LAMBDA = 0.99               # bias variance trade off (high Lambda = high variance, low bias)
 BETA = 0.01                 # regularisation coefficient
 VAR_SCALE = 1
 GP_LAMBDA = 1
@@ -65,7 +65,8 @@ BATCH_SIZE = 32
 T = 0
 EPISODE = 0
 HORIZON = 512
-MSE_TERM_THRESHOLD = 0.5
+MSE_TERM_THRESHOLD = 1
+R_TERM_THRESHOLD = -100
 
 (real, _), (_, _) = mnist.load_data()
 real = real.reshape(-1, IMAGE_COLS, IMAGE_ROWS, IMAGE_CHANNELS)
@@ -135,7 +136,7 @@ def ppo_loss(advantage, new_pi, old_pi):
 		aloss = -K.mean(K.minimum(surr1, surr2))
 
 		entropy = 0.5 * (K.log(2. * np.pi * var_pi + K.epsilon()) + 1.)
-		entropy_penalty = -BETA * K.mean(entropy)
+		entropy_bonus = -BETA * K.mean(entropy)
 
 		# out_of_bounds_penalty = K.mean(K.abs(mu_pi) * K.cast(K.abs(mu_pi) > 1, 'float32'))
 		# out_of_bounds_penalty += K.mean(K.abs(var_pi) * K.cast(K.abs(var_pi) > 1, 'float32'))
@@ -143,10 +144,12 @@ def ppo_loss(advantage, new_pi, old_pi):
 		# shape = [K.shape(y_pred)[0], NUM_ACTIONS]
 		# eps = K.random_normal(shape)
 		# actions = mu_pi + K.sqrt(var_pi) * eps
+		# sq_actions = K.square(actions)
+		# invalid_action_penalty = 0.5 * K.mean(K.cast(sq_actions > 1, 'float32') * (sq_actions - 1))
 		# energy_penalty = -0.1 * K.mean(K.square(actions))
 		# var_bonus = -K.mean(K.square(actions - K.mean(actions, axis=0, keepdims=True)))
 
-		return aloss + entropy_penalty# + var_bonus# + energy_penalty# + out_of_bounds_penalty
+		return aloss + entropy_bonus# + invalid_action_penalty# + var_bonus# + energy_penalty# + out_of_bounds_penalty
 	return loss
 
 def gp_loss(interp_x):
@@ -518,6 +521,9 @@ def runprocess(thread_id, s_t, ref_image):
 		if ((time + 1) == HORIZON) or np.all(x_t == s_t) or (mse_t_1 > MSE_TERM_THRESHOLD):
 			terminal = True
 
+		elif r_t < R_TERM_THRESHOLD:
+			terminal = True
+
 		if terminal:
 			game_state[thread_id].reset()
 			x_t = game_state[thread_id].get_current_frame()
@@ -640,8 +646,6 @@ while True:
 
 	# Only update once we have enough samples in memory
 	if episode_state.shape[0] >= T_MAX * THREADS:
-		e_mean = np.mean(episode_r)
-		e_mse = np.mean(np.square(episode_state[:,:,:,0:episode_refs.shape[3]] - episode_refs))
 
 		# Normalized returns
 		ret_mean = np.mean(episode_r)
@@ -653,6 +657,14 @@ while True:
 		# adv_mean = np.mean(advantage)
 		# adv_std = np.std(advantage)
 		# advantage = (advantage - adv_mean) / (adv_std + 1e-10)
+
+		# Update termination thresholds
+		mse = np.mean(np.square(episode_state[:,:,:,0:episode_refs.shape[3]] - episode_refs), axis = (1, 2, 3))
+		mse_mean = np.mean(mse)
+		mse_std = np.std(mse)
+		MSE_TERM_THRESHOLD = min(MSE_TERM_THRESHOLD, mse_mean + mse_std)
+		# R_TERM_THRESHOLD = ret_mean - ret_std
+		
 		print("backpropagating")
 
 		lr_fn_rl = create_lr_fn(LEARNING_RATE_RL)
@@ -685,10 +697,12 @@ while True:
 
 		if T >= FRAMES_TO_PRETRAIN_DISC:
 			summary = tf.Summary(value=[
-				tf.Summary.Value(tag="reward mean", simple_value=float(e_mean)),
+				tf.Summary.Value(tag="reward mean", simple_value=float(ret_mean)),
 				tf.Summary.Value(tag="action loss", simple_value=float(history.history['loss'][-1])),
 				tf.Summary.Value(tag="critic loss", simple_value=float(critic_hist.history['loss'][-1])),
-				tf.Summary.Value(tag="mse", simple_value=float(e_mse)),
+				tf.Summary.Value(tag="mse", simple_value=float(mse_mean)),
+				tf.Summary.Value(tag="mse termination threshold", simple_value=float(MSE_TERM_THRESHOLD))
+				# tf.Summary.Value(tag="return termination threshold", simple_value=float(R_TERM_THRESHOLD))
 				# tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_eval[0])),
 				# tf.Summary.Value(tag="real loss", simple_value=float(disc_eval[1])),
 				# tf.Summary.Value(tag="fake loss", simple_value=float(disc_eval[2])),
