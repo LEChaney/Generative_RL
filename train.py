@@ -52,7 +52,7 @@ LEARNING_RATE_RL = 1e-4
 LEARNING_RATE_CRITC = 7e-4
 LOSS_CLIPPING = 0.2
 FRAMES_TO_PRETRAIN_DISC = 0
-TIME_SIG_GAIN = 75
+TIME_SIG_GAIN = 1
 INPUT_GAIN = 1
 LEARNING_RATE_DISC = 5e-5
 # TEMPERATURE = 0
@@ -61,12 +61,14 @@ LEARNING_RATE_DISC = 5e-5
 EPOCHS = 3
 THREADS = 16
 T_MAX = 16
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 T = 0
 EPISODE = 0
 HORIZON = 512
-MSE_TERM_THRESHOLD = 1
+MSE_TERM_THRESHOLD = 1 # This is adjusted dynamically and only applied when MSE gets worse after stepping the simulation
 R_TERM_THRESHOLD = -100
+MSE_TERM_PROB = 1 # Probability of terminating when MSE is above threshold
+WARMUP_TIME = 0 # Warmup time before the agent can be terminated
 
 (real, _), (_, _) = mnist.load_data()
 real = real.reshape(-1, IMAGE_COLS, IMAGE_ROWS, IMAGE_CHANNELS)
@@ -344,6 +346,7 @@ def build_critic():
 	h2 = LeakyReLU(alpha=0.2)(h2)
 
 	h2 = Flatten()(h2)
+	h2 = Concatenate()([h2, T])
 
 	h3 = Dense(512, kernel_initializer = 'he_uniform') (h2)
 	h3 = LeakyReLU(alpha=0.2)(h3)
@@ -446,15 +449,14 @@ discriminator._make_predict_function()
 PI._make_predict_function()
 
 game_state = []
-prev_disc = []
+# prev_disc = []
 best_state = []
 # max_score = 0
 for i in range(0,THREADS):
 	game_state.append(game.GameState(1000000))
 	current_frame = game_state[i].get_current_frame()
-	best_state.append({'frame': current_frame, 'mse': 1000}) # Set mse large so that any mse we first encounter will be better
 	current_frame = preprocess(current_frame)
-	prev_disc.append(discriminator.predict(current_frame)[0][0])
+	# prev_disc.append(discriminator.predict(current_frame)[0][0])
 
 def runprocess(thread_id, s_t, ref_image):
 	global T
@@ -494,6 +496,7 @@ def runprocess(thread_id, s_t, ref_image):
 		# Save best state so far
 		if (mse_t < best_state[thread_id]['mse']):
 			best_state[thread_id]['frame'] = s_t[0, ..., 0:IMAGE_CHANNELS] * img_std + img_mean
+			best_state[thread_id]['ref_image'] = ref_image
 			best_state[thread_id]['mse'] = mse_t
 
 		critic_reward = critic.predict([s_t, ref_image, time_sig])
@@ -509,10 +512,10 @@ def runprocess(thread_id, s_t, ref_image):
 
 		# Early termination conditions
 		# mse_ref_to_black = np.mean(np.square(ref_image - black_img))
-		if ((time + 1) == HORIZON) or np.all(x_t == s_t) or (mse_t_1 > MSE_TERM_THRESHOLD):
+		if (r_t == 0) or ((time + 1) == HORIZON) or (r_t < R_TERM_THRESHOLD):
 			terminal = True
-		elif r_t < R_TERM_THRESHOLD:
-			terminal = True
+		if ((time + 1) >= WARMUP_TIME) and (r_t < 0) and (mse_t_1 > MSE_TERM_THRESHOLD): # Only apply mse threshold if we got worse this frame
+			terminal = np.random.random() < MSE_TERM_PROB
 
 		actions = np.reshape(actions, (1, -1))
 		pi = np.reshape(pi, (1, -1))
@@ -525,27 +528,6 @@ def runprocess(thread_id, s_t, ref_image):
 		time_store = np.append(time_store, time_sig, axis = 0)
 		pred_store = np.append(pred_store, pi, axis = 0)
 		critic_store = np.append(critic_store, critic_reward, axis=0)
-
-		if terminal:
-			# On termination we have three options for reset
-			# 1 reset to blank canvas
-			# 2 reset to a random state in current memory
-			# 3 reset to the best previous state for this thread
-			choice = np.random.choice(['hard', 'memory', 'best'])
-			if choice == 'hard':
-				game_state[thread_id].reset()
-			elif choice == 'memory':
-				memory = np.append(episode_state, state_store, axis = 0)
-				random_state = memory[np.random.randint(0, memory.shape[0])]
-				random_state = random_state[..., 0:IMAGE_CHANNELS]
-				random_state = random_state * img_std + img_mean
-				game_state[thread_id].reset(random_state)
-			else:
-				game_state[thread_id].reset(best_state[thread_id]['frame'])
-				
-			x_t = game_state[thread_id].get_current_frame()
-			x_t = preprocess(x_t)
-			prev_disc[thread_id] = discriminator.predict(x_t)[0][0]
 		
 		s_t = np.append(x_t, s_t[..., :-IMAGE_CHANNELS], axis = -1)
 		print("Frame = " + str(T) + ", Updates = " + str(EPISODE) + ", Thread = " + str(thread_id) + ", Action = " + str(actions) + ", Output = "+ str(pi))
@@ -557,8 +539,45 @@ def runprocess(thread_id, s_t, ref_image):
 		v_t_1 = critic.predict([s_t, ref_image, time_sig_t_1])
 		r_store[episode_end_t] = r_t + GAMMA * v_t_1
 	else:
+		# On termination we have three options for reset
+		# 1 reset to blank canvas
+		# 2 reset to a random state in current memory
+		# 3 reset to the best previous state for this thread
+		choice = np.random.choice(['hard', 'memory', 'best'])
+		if choice == 'hard':
+			game_state[thread_id].reset()
+			# Also pick a new random reference image for a hard reset
+			ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0) 
+		elif choice == 'memory':
+			memory = np.append(episode_state, state_store, axis = 0)
+			ref_memory = np.append(episode_refs, refs_store, axis = 0)
+			returns = np.append(episode_r, r_store, axis = 0)
+			returns = (returns - np.mean(returns)) / np.std(returns) # Normalize
+			returns = np.reshape(returns, [-1])
+			indices = np.argsort(returns)[::-1]
+			# indices = indices[:max(indices.size//4, 1)] # Select from top 25% most valuable
+			mem_idx = indices[np.random.randint(0, indices.size)]
+			# Prefer hard reset over negative valued states
+			if returns[mem_idx] < 0:
+				game_state[thread_id].reset()
+				ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0) 
+			else:
+				random_state = memory[mem_idx]
+				random_state = random_state[..., 0:IMAGE_CHANNELS]
+				random_state = random_state * img_std + img_mean
+				game_state[thread_id].reset(random_state)
+				# Also restore reference image from memory
+				ref_image = np.expand_dims(ref_memory[mem_idx], 0)
+		else:
+			game_state[thread_id].reset(best_state[thread_id]['frame'])
+			# Also restore reference image for best state
+			ref_image = best_state[thread_id]['ref_image']
+			
+		s_t = game_state[thread_id].get_current_frame()
+		s_t = preprocess(s_t)
+		s_t = np.concatenate([s_t] * TIME_SLICES, axis = -1)
+
 		r_store[episode_end_t] = r_t # R_t_(1) = r_t + gamma * (V(s_t_1) = 0) when next state (s_t_1) is terminal
-		ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0)
 	
 	# Generalized advantage estimation (Calculating returns R_t for all t in episode, where A_t = R_t - V_t)
 	for i in range(2,len(r_store)+1):
@@ -611,11 +630,12 @@ ref_images = np.zeros((0, IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS))
 
 #initializing state of each thread
 for i in range(0, len(game_state)):
+	ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0)
 	image = game_state[i].get_current_frame()
+	best_state.append({'frame': image, 'mse': 1000, 'ref_image': ref_image}) # Set mse large so that any mse we first encounter will be better
 	image = preprocess(image)
 	state = np.concatenate([image] * TIME_SLICES, axis=3)
 	states = np.append(states, state, axis = 0)
-	ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0)
 	ref_images = np.append(ref_images, ref_image, axis = 0)
 
 while True:	
