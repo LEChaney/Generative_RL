@@ -63,12 +63,13 @@ class GameState:
         image_data = np.transpose(image_data, axes=[1, 0, 2])
         return image_data
 
-    # New state expects an un-normalized numpy array (values ranging from 0 - 255)
+    # New state expects an un-normalized numpy array (values ranging from 0 - 255), shape: [H x W X C]
     # Will be reset using BACKGROUND_COLOR if no new state is specified
     def reset(self, new_state = None):
         if new_state is not None:
             if new_state.shape[-1] < 3:
                 new_state = np.tile(new_state, [1, 1, 3])
+                new_state = np.transpose(new_state, axes=[1, 0, 2])
             self.surface = pygame.surfarray.make_surface(new_state)
         else:
             self.surface.fill(BACKGROUND_COLOR)
