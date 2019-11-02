@@ -39,17 +39,18 @@ import math
 import matplotlib.pyplot as plt
 
 GAMMA = 0.99                # discount value
-LAMBDA = 0.99               # bias variance trade off (high Lambda = high variance, low bias)
-BETA = 0.01                 # regularisation coefficient
+LAMBDA = 0.95               # bias variance trade off (high Lambda = high variance, low bias)
+BETA = 0.00                 # regularisation coefficient
 VAR_SCALE = 1
+R_SCALE = 1
 GP_LAMBDA = 1
 IMAGE_ROWS = 28
 IMAGE_COLS = 28
 TIME_SLICES = 2
 NUM_ACTIONS = 5
 IMAGE_CHANNELS = 1
-LEARNING_RATE_RL = 1e-4
-LEARNING_RATE_CRITC = 1e-4
+LEARNING_RATE_RL = 5e-5
+LEARNING_RATE_CRITC = 7e-4
 LOSS_CLIPPING = 0.2
 FRAMES_TO_PRETRAIN_DISC = 0
 TIME_SIG_GAIN = 1
@@ -58,13 +59,13 @@ LEARNING_RATE_DISC = 5e-5
 # TEMPERATURE = 0
 # TEMP_INCR = 1e-6
 
-EPOCHS = 3
+EPOCHS = 1
 THREADS = 16
-T_MAX = 16
-BATCH_SIZE = 32
+T_MAX = 32
+BATCH_SIZE = 64
 T = 0
 EPISODE = 0
-HORIZON = 512
+HORIZON = 64
 # MSE_TERM_THRESHOLD = 1 # This is adjusted dynamically and only applied when MSE gets worse after stepping the simulation
 # R_TERM_THRESHOLD = -100
 # MSE_UPPER_BOUND_OFFSET = 0.1
@@ -297,7 +298,7 @@ def buildmodel():
 	A = Input(shape = (1,), name = 'Advantage')
 	PI_old = Input(shape = (NUM_ACTIONS * 2,), name = 'Old_Prediction')
 	model = Model(inputs = [S,Ref,A,PI_old], outputs = Act)
-	# optimizer = RMSprop(lr = LEARNING_RATE, rho = 0.99, epsilon = 0.1)
+	# optimizer = RMSprop(lr = LEARNING_RATE_RL, rho = 0.99, epsilon = 0.1)
 	# optimizer = Adam(lr = LEARNING_RATE_RL)
 	optimizer = SGD(LEARNING_RATE_RL, momentum = 0.9)
 	model.compile(loss = ppo_loss(A, PI, PI_old), optimizer = optimizer)
@@ -363,6 +364,7 @@ def build_critic():
 
 	model = Model(inputs = [S, Ref, T], outputs = C)
 	# optimizer = Adam(lr = LEARNING_RATE_CRITC)
+	# optimizer = RMSprop(lr = LEARNING_RATE_CRITC, rho = 0.99, epsilon = 0.1)
 	optimizer = SGD(LEARNING_RATE_CRITC, momentum = 0.9)
 	model.compile(loss = 'mse', optimizer = optimizer)
 	return model
@@ -463,6 +465,7 @@ best_state = []
 mse_upper_bound_offset = []
 mse_upper_bound_center = []
 mse_history = []
+start_image = []
 for i in range(0,THREADS):
 	game_state.append(game.GameState(1000000))
 	current_frame = game_state[i].get_current_frame()
@@ -470,6 +473,7 @@ for i in range(0,THREADS):
 	mse_upper_bound_offset.append(None)
 	mse_upper_bound_center.append(None)
 	mse_history.append([])
+	start_image.append(current_frame)
 	# prev_disc.append(discriminator.predict(current_frame)[0][0])
 
 def runprocess(thread_id, s_t, ref_image):
@@ -494,10 +498,7 @@ def runprocess(thread_id, s_t, ref_image):
 	s_t = s_t.reshape(1, s_t.shape[0], s_t.shape[1], s_t.shape[2])
 	ref_image = np.expand_dims(ref_image, 0)
 
-	start_img = np.array([[[game.BACKGROUND_COLOR]]])
-	if start_img.shape[-1] > IMAGE_CHANNELS:
-		start_img = np.mean(start_img, axis=-1, keepdims=True)
-	mse_0 = np.mean(np.square(ref_image - start_img))
+	mse_0 = np.mean(np.square(ref_image - start_image[thread_id]))
 
 	while t-t_start < T_MAX and terminal == False:
 		t += 1
@@ -527,7 +528,7 @@ def runprocess(thread_id, s_t, ref_image):
 		x_t = preprocess(x_t)
 
 		mse_t_1 = np.mean(np.square(ref_image - x_t))
-		r_t = (mse_t - mse_t_1) / mse_0
+		r_t = R_SCALE * (mse_t - mse_t_1) / mse_0
 
 		# Calculate MSE termination threshold from moving average of MSE mean and standard deviation
 		center_smoothing = 0
@@ -626,6 +627,7 @@ def runprocess(thread_id, s_t, ref_image):
 			
 		s_t = game_state[thread_id].get_current_frame()
 		s_t = preprocess(s_t)
+		start_image[thread_id] = s_t
 		s_t = np.concatenate([s_t] * TIME_SLICES, axis = -1)
 
 		mse_history[thread_id] = [] # Clear mse history
