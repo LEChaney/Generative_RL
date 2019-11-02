@@ -49,8 +49,8 @@ IMAGE_COLS = 28
 TIME_SLICES = 2
 NUM_ACTIONS = 5
 IMAGE_CHANNELS = 1
-LEARNING_RATE_RL = 5e-5
-LEARNING_RATE_CRITC = 7e-4
+LEARNING_RATE_RL = 1e-4
+LEARNING_RATE_CRITC = 1e-4
 LOSS_CLIPPING = 0.2
 FRAMES_TO_PRETRAIN_DISC = 0
 TIME_SIG_GAIN = 1
@@ -531,42 +531,42 @@ def runprocess(thread_id, s_t, ref_image):
 		r_t = R_SCALE * (mse_t - mse_t_1) / mse_0
 
 		# Calculate MSE termination threshold from moving average of MSE mean and standard deviation
-		center_smoothing = 0
-		offset_smoothing = 1 / (1 + time) # Unbias offset at start of rollout
-		offset_scaling = 1
-		mse_history[thread_id].append(mse_t_1)
-		mse_mean = np.mean(mse_history[thread_id])
-		mse_std = np.std(mse_history[thread_id])
-		old_center = mse_upper_bound_center[thread_id]
-		old_offset = mse_upper_bound_offset[thread_id]
-		if time == 0 and mse_upper_bound_center[thread_id] == None:
-			mse_upper_bound_center[thread_id] = mse_mean
-			mse_upper_bound_offset[thread_id] = 1 # Start with a large upper bound and get smaller
-		elif time == 0:
-			mse_upper_bound_center[thread_id] = mse_mean # Snap center on reset
-			mse_upper_bound_offset[thread_id] = old_offset # Keep offset on reset
-		else:
-			new_center = mse_mean
-			new_offset = offset_scaling * mse_std
-			mse_upper_bound_center[thread_id] = center_smoothing * old_center + (1 - center_smoothing) * new_center
-			mse_upper_bound_offset[thread_id] = offset_smoothing * old_offset + (1 - offset_smoothing) * new_offset
-		mse_upper_bound = mse_upper_bound_center[thread_id] + mse_upper_bound_offset[thread_id]
+		# center_smoothing = 0
+		# offset_smoothing = 1 / (1 + time) # Unbias offset at start of rollout
+		# offset_scaling = 1
+		# mse_history[thread_id].append(mse_t_1)
+		# mse_mean = np.mean(mse_history[thread_id])
+		# mse_std = np.std(mse_history[thread_id])
+		# old_center = mse_upper_bound_center[thread_id]
+		# old_offset = mse_upper_bound_offset[thread_id]
+		# if time == 0 and mse_upper_bound_center[thread_id] == None:
+		# 	mse_upper_bound_center[thread_id] = mse_mean
+		# 	mse_upper_bound_offset[thread_id] = 1 # Start with a large upper bound and get smaller
+		# elif time == 0:
+		# 	mse_upper_bound_center[thread_id] = mse_mean # Snap center on reset
+		# 	mse_upper_bound_offset[thread_id] = old_offset # Keep offset on reset
+		# else:
+		# 	new_center = mse_mean
+		# 	new_offset = offset_scaling * mse_std
+		# 	mse_upper_bound_center[thread_id] = center_smoothing * old_center + (1 - center_smoothing) * new_center
+		# 	mse_upper_bound_offset[thread_id] = offset_smoothing * old_offset + (1 - offset_smoothing) * new_offset
+		# mse_upper_bound = mse_upper_bound_center[thread_id] + mse_upper_bound_offset[thread_id]
 
-		# Restrict movement during rollout
-		if time != 0:
-			old_mse_upper_bound = old_center + old_offset
-			# Prevent moving bound upwards during rollout
-			mse_upper_bound = min(mse_upper_bound, old_mse_upper_bound)
-			# Allow moving upwards if our center gets higher than our upper bound
-			# mse_upper_bound = max(mse_upper_bound, mse_upper_bound_center[thread_id])
-			mse_upper_bound_offset[thread_id] = mse_upper_bound - mse_upper_bound_center[thread_id]
+		# # Restrict movement during rollout
+		# if time != 0 and mse_upper_bound_offset[thread_id] > 0:
+		# 	old_mse_upper_bound = old_center + old_offset
+		# 	# Prevent moving bound upwards during rollout
+		# 	mse_upper_bound = min(mse_upper_bound, old_mse_upper_bound)
+		# 	# Allow moving upwards if our center gets higher than our upper bound
+		# 	# mse_upper_bound = max(mse_upper_bound, mse_upper_bound_center[thread_id])
+		# 	mse_upper_bound_offset[thread_id] = mse_upper_bound - mse_upper_bound_center[thread_id]
 
 		# Early termination conditions
 		# mse_ref_to_black = np.mean(np.square(ref_image - black_img))
-		if (r_t == 0) or ((time + 1) == HORIZON): # np.all(x_t == s_t[..., 0:IMAGE_CHANNELS]) or 
+		if ((time + 1) == HORIZON): # np.all(x_t == s_t[..., 0:IMAGE_CHANNELS]) or (r_t == 0)
 			terminal = True
-		elif ((time + 1) >= WARMUP_TIME) and (mse_t_1 > mse_upper_bound):
-			terminal = np.random.random() < MSE_TERM_PROB
+		# elif ((time + 1) >= WARMUP_TIME) and (mse_t_1 > mse_upper_bound):
+		# 	terminal = np.random.random() < MSE_TERM_PROB
 
 		actions = np.reshape(actions, (1, -1))
 		pi = np.reshape(pi, (1, -1))
@@ -594,36 +594,36 @@ def runprocess(thread_id, s_t, ref_image):
 		# 1 reset to blank canvas
 		# 2 reset to a random state in current memory
 		# 3 reset to the best previous state for this thread
-		choice = np.random.choice(['hard', 'memory', 'best'])
+		choice = np.random.choice(['hard'])
 		if choice == 'hard':
 			game_state[thread_id].reset()
 			# Also pick a new random reference image for a hard reset
 			ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0) 
-		elif choice == 'memory':
-			memory = np.append(episode_state, state_store, axis = 0)
-			ref_memory = np.append(episode_refs, refs_store, axis = 0)
-			returns = np.append(episode_r, r_store, axis = 0)
-			# returns = (returns - np.mean(returns)) / np.std(returns) # Normalize
-			returns = np.reshape(returns, [-1])
-			indices = np.argsort(returns)[::-1]
-			indices = indices[:max(indices.size//4, 1)] # Select from top 25% most valuable
-			mem_idx = indices[np.random.randint(0, indices.size)]
-			# Prefer hard reset over negative valued states
-			if returns[mem_idx] < 0:
-				game_state[thread_id].reset()
-				ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0) 
-			else:
-				# mem_idx = np.random.randint(0, memory.shape[0])
-				random_state = memory[mem_idx]
-				random_state = random_state[..., 0:IMAGE_CHANNELS]
-				random_state = random_state * img_std + img_mean
-				game_state[thread_id].reset(random_state)
-				# Also restore reference image from memory
-				ref_image = np.expand_dims(ref_memory[mem_idx], 0)
-		else:
-			game_state[thread_id].reset(best_state[thread_id]['frame'])
-			# Also restore reference image for best state
-			ref_image = best_state[thread_id]['ref_image']
+		# elif choice == 'memory':
+		# 	memory = np.append(episode_state, state_store, axis = 0)
+		# 	ref_memory = np.append(episode_refs, refs_store, axis = 0)
+		# 	returns = np.append(episode_r, r_store, axis = 0)
+		# 	# returns = (returns - np.mean(returns)) / np.std(returns) # Normalize
+		# 	returns = np.reshape(returns, [-1])
+		# 	indices = np.argsort(returns)[::-1]
+		# 	indices = indices[:max(indices.size//4, 1)] # Select from top 25% most valuable
+		# 	mem_idx = indices[np.random.randint(0, indices.size)]
+		# 	# Prefer hard reset over negative valued states
+		# 	if returns[mem_idx] < 0:
+		# 		game_state[thread_id].reset()
+		# 		ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0) 
+		# 	else:
+		# 		# mem_idx = np.random.randint(0, memory.shape[0])
+		# 		random_state = memory[mem_idx]
+		# 		random_state = random_state[..., 0:IMAGE_CHANNELS]
+		# 		random_state = random_state * img_std + img_mean
+		# 		game_state[thread_id].reset(random_state)
+		# 		# Also restore reference image from memory
+		# 		ref_image = np.expand_dims(ref_memory[mem_idx], 0)
+		# else:
+		# 	game_state[thread_id].reset(best_state[thread_id]['frame'])
+		# 	# Also restore reference image for best state
+		# 	ref_image = best_state[thread_id]['ref_image']
 			
 		s_t = game_state[thread_id].get_current_frame()
 		s_t = preprocess(s_t)
@@ -783,21 +783,21 @@ while True:
 		episode_critic = np.empty((0, 1), dtype=np.float32)
 
 		if T >= FRAMES_TO_PRETRAIN_DISC:
-			avg_mse_upper_bound_center = np.mean(mse_upper_bound_center)
-			avg_mse_upper_bound_offset = np.mean(mse_upper_bound_offset)
-			avg_mse_upper_bound = np.mean(np.array(mse_upper_bound_center) + np.array(mse_upper_bound_offset))
+			# avg_mse_upper_bound_center = np.mean(mse_upper_bound_center)
+			# avg_mse_upper_bound_offset = np.mean(mse_upper_bound_offset)
+			# avg_mse_upper_bound = np.mean(np.array(mse_upper_bound_center) + np.array(mse_upper_bound_offset))
 
 			summary = tf.Summary(value=[
 				tf.Summary.Value(tag="reward mean", simple_value=float(ret_mean)),
 				tf.Summary.Value(tag="action loss", simple_value=float(history.history['loss'][-1])),
 				tf.Summary.Value(tag="critic loss", simple_value=float(critic_hist.history['loss'][-1])),
 				tf.Summary.Value(tag="mse", simple_value=float(mse_mean)),
-				tf.Summary.Value(tag="mse upper bound center - thread {}".format(0), simple_value=float(mse_upper_bound_center[0])),
-				tf.Summary.Value(tag="mse upper bound offset - thread {}".format(0), simple_value=float(mse_upper_bound_offset[0])),
-				tf.Summary.Value(tag="mse upper bound - thread {}".format(0), simple_value=float(mse_upper_bound_center[0] + mse_upper_bound_offset[0])),
-				tf.Summary.Value(tag="mse average upper bound center", simple_value=float(avg_mse_upper_bound_center)),
-				tf.Summary.Value(tag="mse average upper bound offset", simple_value=float(avg_mse_upper_bound_offset)),
-				tf.Summary.Value(tag="mse average upper bound", simple_value=float(avg_mse_upper_bound)),
+				# tf.Summary.Value(tag="mse upper bound center - thread {}".format(0), simple_value=float(mse_upper_bound_center[0])),
+				# tf.Summary.Value(tag="mse upper bound offset - thread {}".format(0), simple_value=float(mse_upper_bound_offset[0])),
+				# tf.Summary.Value(tag="mse upper bound - thread {}".format(0), simple_value=float(mse_upper_bound_center[0] + mse_upper_bound_offset[0])),
+				# tf.Summary.Value(tag="mse average upper bound center", simple_value=float(avg_mse_upper_bound_center)),
+				# tf.Summary.Value(tag="mse average upper bound offset", simple_value=float(avg_mse_upper_bound_offset)),
+				# tf.Summary.Value(tag="mse average upper bound", simple_value=float(avg_mse_upper_bound)),
 				# tf.Summary.Value(tag="mse termination threshold", simple_value=float(MSE_TERM_THRESHOLD))
 				# tf.Summary.Value(tag="return termination threshold", simple_value=float(R_TERM_THRESHOLD))
 				# tf.Summary.Value(tag="discriminator loss", simple_value=float(disc_eval[0])),
