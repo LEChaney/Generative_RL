@@ -39,18 +39,18 @@ import math
 import matplotlib.pyplot as plt
 
 GAMMA = 0.99                # discount value
-LAMBDA = 0.95               # bias variance trade off (high Lambda = high variance, low bias)
-BETA = 0.00                 # regularisation coefficient
+LAMBDA = 0.99               # bias variance trade off (high Lambda = high variance, low bias)
+BETA = 0.01                 # regularisation coefficient
 VAR_SCALE = 1
-R_SCALE = 1
+# R_SCALE = 1
 GP_LAMBDA = 1
 IMAGE_ROWS = 28
 IMAGE_COLS = 28
-TIME_SLICES = 2
+TIME_SLICES = 1
 NUM_ACTIONS = 5
 IMAGE_CHANNELS = 1
-LEARNING_RATE_RL = 1e-4
-LEARNING_RATE_CRITC = 1e-4
+LEARNING_RATE_CRITC = 7e-4
+LEARNING_RATE_RL = 3e-4
 LOSS_CLIPPING = 0.2
 FRAMES_TO_PRETRAIN_DISC = 0
 TIME_SIG_GAIN = 1
@@ -297,17 +297,18 @@ def buildmodel():
 	
 	A = Input(shape = (1,), name = 'Advantage')
 	PI_old = Input(shape = (NUM_ACTIONS * 2,), name = 'Old_Prediction')
-	model = Model(inputs = [S,Ref,A,PI_old], outputs = Act)
+	model_train = Model(inputs = [S,Ref,A,PI_old], outputs = Act)
+	model_predict = Model(inputs = [S,Ref,A,PI_old], outputs = [Act, PI])
 	# optimizer = RMSprop(lr = LEARNING_RATE_RL, rho = 0.99, epsilon = 0.1)
 	# optimizer = Adam(lr = LEARNING_RATE_RL)
 	optimizer = SGD(LEARNING_RATE_RL, momentum = 0.9)
-	model.compile(loss = ppo_loss(A, PI, PI_old), optimizer = optimizer)
-	return model
+	model_train.compile(loss = ppo_loss(A, PI, PI_old), optimizer = optimizer)
+	return model_train, model_predict
 
 def build_critic():
 	S = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS * TIME_SLICES, ), name = 'Input')
 	Ref = Input(shape = (IMAGE_ROWS, IMAGE_COLS, IMAGE_CHANNELS, ), name = 'Ref_Image')
-	T = Input(shape = (1,), name = 'Time_Signal')
+	# T = Input(shape = (1,), name = 'Time_Signal')
 	
 	In = Concatenate()([S, Ref])
 	In = Lambda(lambda x: x * INPUT_GAIN)(In)
@@ -355,14 +356,14 @@ def build_critic():
 	h2 = LeakyReLU(alpha=0.2)(h2)
 
 	h2 = Flatten()(h2)
-	h2 = Concatenate()([h2, T])
+	# h2 = Concatenate()([h2, T])
 
 	h3 = Dense(512, kernel_initializer = 'he_uniform') (h2)
 	h3 = LeakyReLU(alpha=0.2)(h3)
 	
 	C = Dense(1, activation = 'linear')(h3)
 
-	model = Model(inputs = [S, Ref, T], outputs = C)
+	model = Model(inputs = [S, Ref], outputs = C)
 	# optimizer = Adam(lr = LEARNING_RATE_CRITC)
 	# optimizer = RMSprop(lr = LEARNING_RATE_CRITC, rho = 0.99, epsilon = 0.1)
 	optimizer = SGD(LEARNING_RATE_CRITC, momentum = 0.9)
@@ -448,15 +449,11 @@ def sigmoid(X):
    return 1/(1+np.exp(-X))
 
 # initialize a new model using buildmodel() or use load_model to resume training an already trained model
-model = buildmodel()
+model_train, model_predict = buildmodel()
 critic = build_critic()
-discriminator, D_train = build_discriminator()
-PI = Model(inputs=model.input, outputs=model.get_layer('PI').output)
 # model.load_weights("saved_models/model_updates10000")
-model._make_predict_function()
+model_predict._make_predict_function()
 critic._make_predict_function()
-discriminator._make_predict_function()
-PI._make_predict_function()
 
 game_state = []
 # prev_disc = []
@@ -478,9 +475,6 @@ for i in range(0,THREADS):
 
 def runprocess(thread_id, s_t, ref_image):
 	global T
-	global model
-	global critic
-	global discriminator
 	# global max_score
 
 	t = 0
@@ -519,16 +513,16 @@ def runprocess(thread_id, s_t, ref_image):
 			best_state[thread_id]['ref_image'] = ref_image
 			best_state[thread_id]['mse'] = mse_t
 
-		critic_reward = critic.predict([s_t, ref_image, time_sig])
-		pi = PI.predict([s_t, ref_image, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])
-		actions = model.predict([s_t, ref_image, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])[0]
+		actions, pi = model_predict.predict([s_t, ref_image, DUMMY_ADVANTAGE, DUMMY_OLD_PRED])
+		actions = np.squeeze(actions)
+		critic_reward = critic.predict([s_t, ref_image])
 
 		x_t = game_state[thread_id].frame_step(actions)
 
 		x_t = preprocess(x_t)
 
 		mse_t_1 = np.mean(np.square(ref_image - x_t))
-		r_t = R_SCALE * (mse_t - mse_t_1) / mse_0
+		r_t = 1 / (1 + mse_t_1)
 
 		# Calculate MSE termination threshold from moving average of MSE mean and standard deviation
 		# center_smoothing = 0
@@ -563,7 +557,7 @@ def runprocess(thread_id, s_t, ref_image):
 
 		# Early termination conditions
 		# mse_ref_to_black = np.mean(np.square(ref_image - black_img))
-		if ((time + 1) == HORIZON): # np.all(x_t == s_t[..., 0:IMAGE_CHANNELS]) or (r_t == 0)
+		if (mse_t_1 >= mse_t) or ((time + 1) == HORIZON): # np.all(x_t == s_t[..., 0:IMAGE_CHANNELS]) or (r_t == 0)
 			terminal = True
 		# elif ((time + 1) >= WARMUP_TIME) and (mse_t_1 > mse_upper_bound):
 		# 	terminal = np.random.random() < MSE_TERM_PROB
@@ -584,46 +578,47 @@ def runprocess(thread_id, s_t, ref_image):
 		print("Frame = " + str(T) + ", Updates = " + str(EPISODE) + ", Thread = " + str(thread_id) + ", Action = " + str(actions) + ", Output = "+ str(pi))
 	
 	episode_end_t = len(r_store)-1
+	time_t_1 = time + 1
 	if not terminal:
-		time_t_1 = time + 1
-		time_sig_t_1 = TIME_SIG_GAIN * np.array(time_t_1 / (HORIZON - 1) - 0.5).reshape(1, 1)
-		v_t_1 = critic.predict([s_t, ref_image, time_sig_t_1])
+		# time_sig_t_1 = TIME_SIG_GAIN * np.array(time_t_1 / (HORIZON - 1) - 0.5).reshape(1, 1)
+		v_t_1 = critic.predict([s_t, ref_image])
 		r_store[episode_end_t] = r_t + GAMMA * v_t_1
 	else:
 		# On termination we have three options for reset
 		# 1 reset to blank canvas
 		# 2 reset to a random state in current memory
 		# 3 reset to the best previous state for this thread
-		choice = np.random.choice(['hard'])
+		choice = np.random.choice(['best'])
+		# choice = 'best' if time_t_1 < HORIZON else 'hard'
 		if choice == 'hard':
 			game_state[thread_id].reset()
 			# Also pick a new random reference image for a hard reset
 			ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0) 
-		# elif choice == 'memory':
-		# 	memory = np.append(episode_state, state_store, axis = 0)
-		# 	ref_memory = np.append(episode_refs, refs_store, axis = 0)
-		# 	returns = np.append(episode_r, r_store, axis = 0)
-		# 	# returns = (returns - np.mean(returns)) / np.std(returns) # Normalize
-		# 	returns = np.reshape(returns, [-1])
-		# 	indices = np.argsort(returns)[::-1]
-		# 	indices = indices[:max(indices.size//4, 1)] # Select from top 25% most valuable
-		# 	mem_idx = indices[np.random.randint(0, indices.size)]
-		# 	# Prefer hard reset over negative valued states
-		# 	if returns[mem_idx] < 0:
-		# 		game_state[thread_id].reset()
-		# 		ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0) 
-		# 	else:
-		# 		# mem_idx = np.random.randint(0, memory.shape[0])
-		# 		random_state = memory[mem_idx]
-		# 		random_state = random_state[..., 0:IMAGE_CHANNELS]
-		# 		random_state = random_state * img_std + img_mean
-		# 		game_state[thread_id].reset(random_state)
-		# 		# Also restore reference image from memory
-		# 		ref_image = np.expand_dims(ref_memory[mem_idx], 0)
-		# else:
-		# 	game_state[thread_id].reset(best_state[thread_id]['frame'])
-		# 	# Also restore reference image for best state
-		# 	ref_image = best_state[thread_id]['ref_image']
+		elif choice == 'memory':
+			memory = np.append(episode_state, state_store, axis = 0)
+			ref_memory = np.append(episode_refs, refs_store, axis = 0)
+			# returns = np.append(episode_r, r_store, axis = 0)
+			# # returns = (returns - np.mean(returns)) / np.std(returns) # Normalize
+			# returns = np.reshape(returns, [-1])
+			# indices = np.argsort(returns)[::-1]
+			# indices = indices[:max(indices.size//4, 1)] # Select from top 25% most valuable
+			# mem_idx = indices[np.random.randint(0, indices.size)]
+			# # Prefer hard reset over negative valued states
+			# if returns[mem_idx] < 0:
+			# 	game_state[thread_id].reset()
+			# 	ref_image = np.expand_dims(real[np.random.randint(0, real.shape[0])], 0) 
+			# else:
+			mem_idx = np.random.randint(0, memory.shape[0])
+			random_state = memory[mem_idx]
+			random_state = random_state[..., 0:IMAGE_CHANNELS]
+			random_state = random_state * img_std + img_mean
+			game_state[thread_id].reset(random_state)
+			# Also restore reference image from memory
+			ref_image = np.expand_dims(ref_memory[mem_idx], 0)
+		else:
+			game_state[thread_id].reset(best_state[thread_id]['frame'])
+			# Also restore reference image for best state
+			ref_image = best_state[thread_id]['ref_image']
 			
 		s_t = game_state[thread_id].get_current_frame()
 		s_t = preprocess(s_t)
@@ -771,8 +766,8 @@ while True:
 		# else:
 			# disc_eval = D_train.evaluate([real_episode, episode_state], [positive_y, negative_y, dummy_y], batch_size = episode_state.shape[0])
 			# disc_hist = D_train.fit([real_episode, episode_state], [positive_y, negative_y, dummy_y], callbacks = callbacks_disc, epochs = EPISODE + EPOCHS * 3, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
-		critic_hist = critic.fit([episode_state, episode_refs, episode_time], episode_r, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
-		history = model.fit([episode_state, episode_refs, advantage, episode_pred], episode_action, callbacks = callbacks_rl, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+		critic_hist = critic.fit([episode_state, episode_refs], episode_r, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
+		history = model_train.fit([episode_state, episode_refs, advantage, episode_pred], episode_action, callbacks = callbacks_rl, epochs = EPISODE + EPOCHS, batch_size = BATCH_SIZE, initial_epoch = EPISODE)
 
 		episode_r = np.empty((0, 1), dtype=np.float32)
 		episode_pred = np.empty((0, NUM_ACTIONS * 2), dtype=np.float32)
